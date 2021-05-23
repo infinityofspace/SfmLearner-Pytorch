@@ -1,0 +1,9 @@
+# install nodesjs >= 14
+sudo apt install nodejs
+or
+curl -fsSL https://deb.nodesource.com/setup_14.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# install plotly plugins
+jupyter labextension install jupyterlab-plotly@4.14.3
+jupyter labextension install @jupyter-widgets/jupyterlab-manager plotlywidget@4.14.3

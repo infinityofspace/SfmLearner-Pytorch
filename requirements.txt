@@ -9,3 +9,7 @@ progressbar2
 tqdm
 path
 pebble
+jupyterlab
+ipywidgets>=7.5
+plotly>=4.14.3
+
