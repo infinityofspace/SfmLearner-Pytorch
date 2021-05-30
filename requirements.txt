@@ -12,4 +12,6 @@ pebble
 jupyterlab
 ipywidgets>=7.5
 plotly>=4.14.3
+scikit-image
+opencv-python
 
