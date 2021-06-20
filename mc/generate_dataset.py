@@ -3,24 +3,19 @@ import gym
 import cv2
 from pathlib import Path
 import numpy as np
+import imageio
 
 root_dataset_dir_path = Path("mc_predefinied_agent_actions")
 
-env = gym.make("MineRLNavigate-v0")
+env = gym.make("MineRLTreechop-v0")
 
 
 # minerl-action-name, action-value, action-folder-name, number-of-samples, max-number-of-frames
 dataset_actions = [
-    ("camera", np.array([5, 0]), "camera_pitch_5", 5, 18),
-    ("camera", np.array([10, 0]), "camera_pitch_10", 5, 9),
-    ("camera", np.array([-5, 0]), "camera_pitch_-5", 5, 18),
-    ("camera", np.array([0, 5]), "camera_yaw_5", 5, 80),
-    ("camera", np.array([0, 10]), "camera_yaw_10", 10, 50),
-    ("camera", np.array([0, 90]), "camera_yaw_90", 5, 10),
-    ("forward", 1, "forward", 100, 1000),
-    ("left", 1, "left", 100, 1000),
-    ("right", 1, "right", 100, 1000),
-    ("jump", 1, "jump", 10, 50)
+    ("camera", np.array([0, 5]), "camera_yaw_5", 5, 73),
+    ("camera", np.array([0, 10]), "camera_yaw_10", 5, 37),
+    ("camera", np.array([0, 20]), "camera_yaw_20", 5, 19),
+    ("camera", np.array([0, 30]), "camera_yaw_30", 5, 13),
 ]
 
 
@@ -42,7 +37,7 @@ for action_name, value, action_folder_name, n_samples, n_frames  in dataset_acti
 
             obs, reward, done, info = env.step(action)
             while i < n_frames and not done:
-                if not cv2.imwrite(str(frames_dir_path.joinpath(str(i))) + ".jpg", obs["pov"]):
+                if imageio.imwrite(str(frames_dir_path.joinpath(str(i))) + ".png", obs["pov"]):
                     raise Exception("Could not save image")
                                     
                 action[action_name] = value
