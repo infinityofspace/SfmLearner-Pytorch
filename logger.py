@@ -13,7 +13,7 @@ class TermLogger(object):
         e = 1   # epoch bar position
         tr = 3  # train bar position
         ts = 6  # valid bar position
-        h = self.t.height
+        h = 10 if not self.t.height else self.t.height
 
         for i in range(10):
             print('')
