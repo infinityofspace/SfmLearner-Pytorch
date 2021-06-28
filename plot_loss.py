@@ -5,14 +5,26 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 
-def plot_full(train_loss, photo_loss, labels):
-    for train_l, photo_l, l in zip(train_loss, photo_loss, labels):
-        plt.plot(list(range(len(train_l))), train_l, label=l)
-        plt.plot(list(range(len(photo_l))), photo_l, label=l)
+def plot_full(train_losses, photo_losses, labels, sub_parts=2000):
+    for train_loss, photo_loss, l in zip(train_losses, photo_losses, labels):
+        train_loss_means = [train_loss[i:i + sub_parts] for i in
+                            range(0, len(train_loss), sub_parts)]
+        train_loss_means = [sum(loss) / len(loss) for loss in train_loss_means]
+
+        photo_loss_means = [photo_loss[i:i + sub_parts] for i in
+                            range(0, len(photo_loss), sub_parts)]
+        photo_loss_means = [sum(loss) / len(loss) for loss in photo_loss_means]
+
+        plt.plot(list(range(sub_parts, sub_parts * len(train_loss_means) + 1, sub_parts)), train_loss_means,
+                 label=l + " train loss")
+        plt.plot(list(range(sub_parts, sub_parts * len(photo_loss_means) + 1, sub_parts)), photo_loss_means,
+                 label=l + " photo loss")
+
     plt.xlabel("batch")
     plt.ylabel("loss")
-    plt.title("loss after each batch")
+    plt.title(f"mean loss of {sub_parts} batches after each batch")
     plt.legend()
+    plt.grid("on")
     plt.show()
     plt.clf()
 
@@ -97,6 +109,8 @@ if __name__ == "__main__":
             losses = read_full_log(path)
             train_losses.append(losses[0])
             photo_losses.append(losses[1])
+
+            plot_full([losses[0]], [losses[1]], [model_name + ", " + path.name])
 
             losses = read_summary_log(path)
             epoch_train_losses.append(losses[0])
