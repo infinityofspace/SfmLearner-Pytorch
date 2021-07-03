@@ -1,14 +1,18 @@
 from __future__ import division
 import numpy as np
 import torch
+from kornia.color import RgbToHsv
 from torch import nn
 import torch.nn.functional as F
 from inverse_warp import inverse_warp
 
+rgb_to_hsv = RgbToHsv()
+
 
 def photometric_reconstruction_loss(tgt_img, ref_imgs, intrinsics,
                                     depth, explainability_mask, pose,
-                                    rotation_mode='euler', padding_mode='zeros'):
+                                    rotation_mode='euler', padding_mode='zeros',
+                                    hs_loss=False):
     def one_scale(depth, explainability_mask):
         assert(explainability_mask is None or depth.size()[2:] == explainability_mask.size()[2:])
         assert(pose.size(1) == len(ref_imgs))
@@ -30,7 +34,17 @@ def photometric_reconstruction_loss(tgt_img, ref_imgs, intrinsics,
             ref_img_warped, valid_points = inverse_warp(ref_img, depth[:,0], current_pose,
                                                         intrinsics_scaled,
                                                         rotation_mode, padding_mode)
-            diff = (tgt_img_scaled - ref_img_warped) * valid_points.unsqueeze(1).float()
+
+            if hs_loss:
+                # convert each batch image to hsv
+                tgt_img_scaled_hsv = rgb_to_hsv(tgt_img_scaled)
+                tgt_img_scaled_hsv[:, 2] = 0
+                ref_img_warped_hsv = rgb_to_hsv(ref_img_warped)
+                ref_img_warped_hsv[:, 2] = 0
+
+                diff = (tgt_img_scaled_hsv - ref_img_warped_hsv) * valid_points.unsqueeze(1).float()
+            else:
+                diff = (tgt_img_scaled - ref_img_warped) * valid_points.unsqueeze(1).float()
 
             if explainability_mask is not None:
                 diff = diff * explainability_mask[:,i:i+1].expand_as(diff)

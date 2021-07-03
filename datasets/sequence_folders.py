@@ -6,7 +6,7 @@ import random
 
 
 def load_as_float(path):
-    return imread(path).astype(np.float32)
+    return imread(path).astype(np.float32)[:, :, :3]
 
 
 class SequenceFolder(data.Dataset):
@@ -29,8 +29,8 @@ class SequenceFolder(data.Dataset):
         scene_list_path = self.root/'train.txt' if train else self.root/'val.txt'
         self.scenes = [self.root/folder[:-1] for folder in open(scene_list_path)]
         self.transform = transform
-        self.crawl_folders(sequence_length)
         self.image_file_ending = image_file_ending
+        self.crawl_folders(sequence_length)
 
     def crawl_folders(self, sequence_length):
         sequence_set = []

@@ -74,6 +74,8 @@ parser.add_argument('-f', '--training-output-freq', type=int,
                     help='frequence for outputting dispnet outputs and warped imgs at training for all scales. '
                          'if 0, will not output',
                     metavar='N', default=0)
+parser.add_argument('--hs-loss', action='store_true', help='use hs of the hsv space to calculate photometric loss')
+
 
 best_error = -1
 n_iter = 0
@@ -289,7 +291,8 @@ def train(args, train_loader, disp_net, pose_exp_net, optimizer, epoch_size, log
 
         loss_1, warped, diff = photometric_reconstruction_loss(tgt_img, ref_imgs, intrinsics,
                                                                depth, explainability_mask, pose,
-                                                               args.rotation_mode, args.padding_mode)
+                                                               args.rotation_mode, args.padding_mode,
+                                                               args.hs_loss)
         if w2 > 0:
             loss_2 = explainability_loss(explainability_mask)
         else:
