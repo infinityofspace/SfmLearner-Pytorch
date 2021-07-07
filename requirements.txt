@@ -15,3 +15,4 @@ plotly>=4.14.3
 scikit-image
 opencv-python
 kornia
+imageio-ffmpeg
