@@ -5,3 +5,5 @@ checkpoints/
 venv
 .idea
 .ipynb_checkpoints
+
+frames/
