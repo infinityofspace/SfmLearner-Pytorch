@@ -2,6 +2,7 @@ import argparse
 import glob
 import sys
 import typing
+from itertools import repeat
 from pathlib import Path
 
 import cv2
@@ -9,9 +10,10 @@ import imageio
 import numpy as np
 import torch
 from imageio import imread
+from matplotlib import pyplot as plt
 from scipy.spatial.transform import Rotation as R
 
-sys.path.append(".")
+sys.path.append("..")
 from inverse_warp import pose_vec2mat, inverse_warp
 
 from models import PoseExpNet, DispNetS
@@ -27,6 +29,8 @@ INTRINSICS = np.array([[focal_length, 0, IMG_SIZE / 2],
                        [0, focal_length, IMG_SIZE / 2],
                        [0, 0, 1]])
 INTRINSICS = torch.from_numpy(INTRINSICS.astype(np.float32)).unsqueeze(0)
+
+RUNNING_PLOT_RANGE = list(reversed(range(20)))
 
 
 def load_pose_exp_net(posenet_path: str) -> PoseExpNet:
@@ -85,6 +89,31 @@ class SeqFrames(object):
         return len(self.image_paths)
 
 
+def generate_running_plot(plot_range, y_values, y_label, x_label, y_ticks=None, legend_labels=None):
+    fig = plt.figure()
+
+    if not legend_labels:
+        legend_labels = repeat("None")
+
+    for y_vals, label in zip(y_values, legend_labels):
+        plt.plot(plot_range[-len(y_vals):], y_vals, label=label)
+
+    plt.xticks(plot_range)
+    plt.xlabel(x_label)
+    plt.yticks(y_ticks)
+    plt.ylabel(y_label)
+
+    if legend_labels:
+        plt.legend(loc="upper right")
+
+    fig.canvas.draw()
+    plot = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+    plot = plot.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    plt.close("all")
+
+    return plot
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")
     parser.add_argument("frames_root_path", type=str, help="Path to root dir of frames")
@@ -107,7 +136,10 @@ if __name__ == "__main__":
 
     output_video = imageio.get_writer(args.output, mode="I")
 
-    for seq_frames in SeqFrames(Path(args.frames_root_path)):
+    losses = []
+    poses = []
+
+    for i, seq_frames in enumerate(SeqFrames(Path(args.frames_root_path))):
         imgs = [np.transpose(img, (2, 0, 1)) for img in seq_frames]
 
         ref_imgs = []
@@ -136,12 +168,12 @@ if __name__ == "__main__":
         photo_loss = None
 
         if args.pose_net_path:
-            _, poses = pose_net(tgt_img, ref_imgs)
+            _, img_poses = pose_net(tgt_img, ref_imgs)
 
-            poses = poses.cpu()[0]
-            poses = torch.cat([poses[:len(imgs) // 2], torch.zeros(1, 6).float(), poses[len(imgs) // 2:]])
+            img_poses = img_poses.cpu()[0]
+            img_poses = torch.cat([img_poses[:len(imgs) // 2], torch.zeros(1, 6).float(), img_poses[len(imgs) // 2:]])
 
-            inv_transform_matrices = pose_vec2mat(poses, rotation_mode="euler").detach().numpy().astype(np.float64)
+            inv_transform_matrices = pose_vec2mat(img_poses, rotation_mode="euler").detach().numpy().astype(np.float64)
 
             rot_matrices = np.linalg.inv(inv_transform_matrices[:, :, :3])
             tr_vectors = -rot_matrices @ inv_transform_matrices[:, :, -1:]
@@ -152,9 +184,10 @@ if __name__ == "__main__":
             final_poses = first_inv_transform[:, :3] @ transform_matrices
             final_poses[:, :, -1:] += first_inv_transform[:, -1:]
 
-            poses = pose_mat2vec(final_poses)
+            img_poses = pose_mat2vec(final_poses)
 
-            tgt_pose = poses[len(imgs) // 2 + 1]
+            tgt_pose = img_poses[len(imgs) // 2 + 1]
+            poses.append(tgt_pose)
             tgt_pose_tensor = torch.from_numpy(tgt_pose.astype(np.float32)).unsqueeze(0)
 
             if pred_disp is not None and False:
@@ -180,28 +213,44 @@ if __name__ == "__main__":
 
             photo_loss = diff.abs().mean()
 
-        info_img = np.zeros((64, 64, 3), dtype=np.uint8)
+            losses.append(photo_loss)
 
-        cv2.putText(img=info_img,
-                    text="loss: {:.3f}".format(photo_loss),
-                    org=(0, 8),
-                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                    fontScale=0.33,
-                    color=(255, 255, 255),
-                    lineType=0)
+        loss_plot = generate_running_plot(plot_range=RUNNING_PLOT_RANGE,
+                                          y_values=[losses[-len(RUNNING_PLOT_RANGE):]],
+                                          y_label="photo loss",
+                                          x_label="n-th last frame")
 
-        for i, (val, label) in enumerate(zip(tgt_pose, ["tx", "ty", "tz", "y", "p", "r"])):
-            cv2.putText(img=info_img,
-                        text="{}: {:.3f}".format(label, val),
-                        org=(0, 16 + 9 * i),
-                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                        fontScale=0.33,
-                        color=(255, 255, 255),
-                        lineType=0)
+        # generate tx, ty, tz running plot
+        txs = [p[0] for p in poses[-len(RUNNING_PLOT_RANGE):]]
+        tys = [p[1] for p in poses[-len(RUNNING_PLOT_RANGE):]]
+        tzs = [p[2] for p in poses[-len(RUNNING_PLOT_RANGE):]]
+        trans_plot = generate_running_plot(plot_range=RUNNING_PLOT_RANGE,
+                                           y_values=[txs, tys, tzs],
+                                           y_label="translation",
+                                           x_label="n-th last frame",
+                                           legend_labels=["tx", "ty", "tz"])
+
+        # generate yaw, pitch, roll running plot
+        yaws = [p[3] for p in poses[-len(RUNNING_PLOT_RANGE):]]
+        pitchs = [p[4] for p in poses[-len(RUNNING_PLOT_RANGE):]]
+        rolls = [p[5] for p in poses[-len(RUNNING_PLOT_RANGE):]]
+        rot_plot = generate_running_plot(plot_range=RUNNING_PLOT_RANGE,
+                                         y_values=[yaws, pitchs, rolls],
+                                         y_label="rotation",
+                                         x_label="n-th last frame",
+                                         legend_labels=["yaw", "pitch", "roll"])
+
+        loss_plot = cv2.resize(loss_plot, dsize=(450, 250), interpolation=cv2.INTER_LINEAR)
+        trans_plot = cv2.resize(trans_plot, dsize=(450, 250), interpolation=cv2.INTER_LINEAR)
+        rot_plot = cv2.resize(rot_plot, dsize=(450, 250), interpolation=cv2.INTER_LINEAR)
+        second_col = np.vstack((loss_plot, trans_plot, rot_plot))
 
         first_row = np.hstack((target_frame, next_frame, warped_frame))
-        second_row = np.hstack((depth_img, diff_img, info_img))
+        second_row = np.hstack((depth_img, diff_img, np.zeros_like(diff_img)))
+        first_col = np.vstack((first_row, second_row))
+        first_col = cv2.resize(first_col, dsize=(int(second_col.shape[0] / 3) * 4, second_col.shape[0]),
+                               interpolation=cv2.INTER_LINEAR)
 
-        output_video.append_data(np.vstack((first_row, second_row)))
+        output_video.append_data(np.concatenate((first_col, second_col), axis=1))
 
     output_video.close()
