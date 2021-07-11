@@ -1,4 +1,5 @@
 import argparse
+import os
 import subprocess
 import sys
 from multiprocessing import Pool
@@ -6,8 +7,8 @@ from pathlib import Path
 
 import tqdm
 
-from mc.create_visualisation import generate_results, create_video
-from mc.data import MODELS, DATASETS
+from create_visualisation import generate_results, create_video
+from data import MODELS, DATASETS
 
 
 def make_video(params):
@@ -65,7 +66,7 @@ def main(processes, post_compress=True):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")
-    parser.add_argument("-p", "--processes", type=str, help="Number of processes to use", default=8)
+    parser.add_argument("-p", "--processes", type=int, help="Number of processes to use", default=os.cpu_count())
 
     args = parser.parse_args()
 
