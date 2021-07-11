@@ -130,7 +130,7 @@ def generate_results(frames_root_path, pose_net_path, disp_net_path, seq_length=
     pose_net = load_pose_exp_net(pose_net_path)
 
     disp_net = None
-    if args.disp_net_path:
+    if disp_net_path:
         disp_net = load_disp_net(disp_net_path)
 
     result_imgs = []
@@ -154,7 +154,7 @@ def generate_results(frames_root_path, pose_net_path, disp_net_path, seq_length=
         pred_disp = None
         depth_img = np.zeros((64, 64, 3), dtype=np.uint8)
 
-        if args.disp_net_path:
+        if disp_net_path:
             pred_disp = disp_net(tgt_img)[0]
 
             depth_img = pred_disp.squeeze(0).detach().numpy()
