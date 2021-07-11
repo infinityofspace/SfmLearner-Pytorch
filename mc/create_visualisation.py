@@ -104,6 +104,11 @@ def generate_running_plot(x_values, x_label, x_ticks, y_values, y_label, y_ticks
     plt.xlabel(x_label)
     ax.invert_xaxis()
 
+    zero_idx = int(np.where(x_ticks == 0)[0])
+    gridlines = ax.xaxis.get_gridlines()
+    gridlines[zero_idx].set_color("k")
+    gridlines[zero_idx].set_linewidth(1)
+
     if min_y_val > min(y_ticks) and max_y_val < max(y_ticks):
         plt.yticks(y_ticks)
     plt.ylabel(y_label)
@@ -128,10 +133,8 @@ def generate_results(frames_root_path, pose_net_path, disp_net_path, seq_length=
     if args.disp_net_path:
         disp_net = load_disp_net(disp_net_path)
 
-    # each result have the following structure:
-    # (orig_frame, sequential_frame, warped_frame, depth_img, sequential_diff_img, warped_diff_img)
     result_imgs = []
-    losses = []
+    valid_points_list = []
     poses = []
 
     for i, seq_frames in enumerate(SeqFrames(Path(frames_root_path), seq_length=seq_length, step=step)):
@@ -143,7 +146,6 @@ def generate_results(frames_root_path, pose_net_path, disp_net_path, seq_length=
             temp_img = ((temp_img / 255 - 0.5) / 0.5).to(device)
             if i == len(imgs) // 2:
                 tgt_img = temp_img
-                sequential_img = ((torch.from_numpy(imgs[i + 1]).unsqueeze(0) / 255 - 0.5) / 0.5).to(device)
                 tgt_frame = np.transpose(img, (1, 2, 0)).astype(np.uint8)
                 next_frame = np.transpose(imgs[i + 1], (1, 2, 0)).astype(np.uint8)
             else:
@@ -194,44 +196,63 @@ def generate_results(frames_root_path, pose_net_path, disp_net_path, seq_length=
         warped_frame = np.transpose((warped_frame_tensor.squeeze(0) * 0.5 + 0.5) * 255,
                                     (1, 2, 0)).detach().numpy().astype(np.uint8)
 
-        warped_diff = (sequential_img - warped_frame_tensor) * valid_points.unsqueeze(1).float()
-
-        warped_diff_img = warped_diff.squeeze(0).abs().numpy()
-        warped_diff_img = np.transpose(warped_diff_img, (1, 2, 0))
-        warped_diff_img = np.sum(warped_diff_img, axis=2) / (2 * 3)
-        warped_diff_img = cv2.cvtColor(warped_diff_img * 255, cv2.COLOR_GRAY2BGR).astype(np.uint8)
-
-        photo_loss = warped_diff.abs().mean()
-        losses.append(photo_loss)
-
-        # sequential diff
-        sequential_diff = tgt_img - sequential_img
-
-        sequential_diff_img = sequential_diff.squeeze(0).abs().numpy()
-        sequential_diff_img = np.transpose(sequential_diff_img, (1, 2, 0))
-        sequential_diff_img = np.sum(sequential_diff_img, axis=2) / (2 * 3)
-        sequential_diff_img = cv2.cvtColor(sequential_diff_img * 255, cv2.COLOR_GRAY2BGR).astype(np.uint8)
-
         result_imgs.append((tgt_frame,
                             next_frame,
                             warped_frame,
-                            depth_img,
-                            sequential_diff_img,
-                            warped_diff_img))
+                            depth_img))
+        valid_points_list.append(np.transpose(valid_points.numpy(), (1, 2, 0)))
 
-    return np.array(result_imgs), np.array(losses), np.array(poses)
+    return np.array(result_imgs), np.array(valid_points_list), np.array(poses)
 
 
-def create_video(output_path, result_imgs, losses, poses, repeated_frames=1):
-    loss_std = losses.std()
-    loss_mean = losses.mean()
+def convert_rgb_to_gray_rgb(img, max=3 * 255):
+    temp_img = ((np.sum(img, axis=2) / max) * 255).astype(np.uint8)
+    temp_img = cv2.cvtColor(temp_img, cv2.COLOR_GRAY2RGB).astype(np.uint8)
+    return temp_img
 
-    loss_lower_bound = loss_mean + loss_std
+
+def create_video(output_path, result_imgs, valid_points_list, poses, repeated_frames=1):
+    diff_imgs = []
+    losses = []
+    for (tgt_frame, next_frame, warped_frame, depth_img), valid_points in zip(result_imgs, valid_points_list):
+        warped_diff = cv2.absdiff(next_frame, warped_frame) * valid_points
+        warped_diff_img = convert_rgb_to_gray_rgb(warped_diff)
+        photo_loss = np.abs(warped_diff).mean()
+
+        # sequential diff
+        sequential_diff = cv2.absdiff(tgt_frame, next_frame)
+        sequential_diff_img = convert_rgb_to_gray_rgb(sequential_diff)
+        sequential_photo_loss = np.abs(sequential_diff).mean()
+        valid_points_sequential_photo_loss = (np.abs(sequential_diff) * valid_points).mean()
+
+        ## hs diff
+        tgt_frame_hsv = cv2.cvtColor(tgt_frame, cv2.COLOR_RGB2HSV)
+        tgt_frame_hsv[:, :, 2] = 0
+        next_frame_hsv = cv2.cvtColor(next_frame, cv2.COLOR_RGB2HSV)
+        next_frame_hsv[:, :, 2] = 0
+        sequential_hs_diff = cv2.absdiff(tgt_frame_hsv, next_frame_hsv)
+        sequential_hs_diff_img = convert_rgb_to_gray_rgb(sequential_hs_diff)
+
+        warped_frame_hsv = cv2.cvtColor(warped_frame, cv2.COLOR_RGB2HSV)
+        warped_frame_hsv[:, :, 2] = 0
+        warped_hs_diff = cv2.absdiff(next_frame_hsv, warped_frame_hsv) * valid_points
+        warped_hs_diff_img = convert_rgb_to_gray_rgb(warped_hs_diff)
+
+        losses.append((photo_loss, sequential_photo_loss, valid_points_sequential_photo_loss))
+        diff_imgs.append((warped_diff_img, sequential_diff_img, sequential_hs_diff_img, warped_hs_diff_img))
+
+    losses = np.array(losses)
+    diff_imgs = np.array(diff_imgs)
+
+    loss_std = losses.std(axis=0)
+    loss_mean = losses.mean(axis=0)
+
+    loss_lower_bound = min(loss_mean) + min(loss_std)
     if len(np.where(losses < loss_lower_bound)) > len(losses) / 8:
-        loss_lower_bound -= loss_std * 3
-    loss_upper_bound = loss_mean + loss_std
+        loss_lower_bound -= min(loss_std) * 3
+    loss_upper_bound = max(loss_mean) + max(loss_std)
     if len(np.where(losses > loss_upper_bound)) > len(losses) / 8:
-        loss_upper_bound += loss_std * 3
+        loss_upper_bound += max(loss_std) * 3
 
     pose_std = poses.std(axis=0)
     pose_mean = poses.mean(axis=0)
@@ -254,8 +275,11 @@ def create_video(output_path, result_imgs, losses, poses, repeated_frames=1):
 
     # write results as video
     with imageio.get_writer(output_path, mode="I") as output_video:
-        for i, (tgt_frame, next_frame, warped_frame, depth_img, sequential_diff_img, warped_diff_img) in enumerate(
-                result_imgs):
+        for i, (result_frames, diff_imgs, valid_points) in enumerate(zip(result_imgs, diff_imgs, valid_points_list)):
+            tgt_frame, next_frame, warped_frame, depth_img = result_frames
+            warped_diff_img, sequential_diff_img, sequential_hs_diff_img, warped_hs_diff_img = diff_imgs
+
+            warped_frame *= valid_points
 
             idxs = x_ticks + i
             valid_idxs = (idxs >= 0) & (idxs < len(result_imgs))
@@ -265,9 +289,10 @@ def create_video(output_path, result_imgs, losses, poses, repeated_frames=1):
             loss_plot = generate_running_plot(x_values=x_values,
                                               x_label="n-th frame",
                                               x_ticks=x_ticks,
-                                              y_values=[losses[idxs]],
+                                              y_values=list(zip(*losses[idxs])),
                                               y_label="photo loss",
-                                              y_ticks=np.linspace(0, loss_upper_bound, 10))
+                                              y_ticks=np.linspace(0, loss_upper_bound, 10),
+                                              legend_labels=["1f - warped", "0f - 1f", "0f - 1f (valid points)"])
 
             # generate tx, ty, tz running plot
             trans_plot = generate_running_plot(x_values=x_values,
@@ -287,21 +312,49 @@ def create_video(output_path, result_imgs, losses, poses, repeated_frames=1):
                                              y_ticks=np.linspace(rot_lower_bound, rot_upper_bound, 10),
                                              legend_labels=["pitch", "yaw", "roll"])
 
+            video_height = 900
+            plot_size = (int(5 / 3 * video_height // 3), video_height // 3)
             # resize plots
-            loss_plot = cv2.resize(loss_plot, dsize=(500, 300), interpolation=cv2.INTER_LINEAR)
-            trans_plot = cv2.resize(trans_plot, dsize=(500, 300), interpolation=cv2.INTER_LINEAR)
-            rot_plot = cv2.resize(rot_plot, dsize=(500, 300), interpolation=cv2.INTER_LINEAR)
-            second_col = np.vstack((loss_plot, trans_plot, rot_plot))
+            loss_plot = cv2.resize(loss_plot, dsize=plot_size, interpolation=cv2.INTER_CUBIC)
+            trans_plot = cv2.resize(trans_plot, dsize=plot_size, interpolation=cv2.INTER_CUBIC)
+            rot_plot = cv2.resize(rot_plot, dsize=plot_size, interpolation=cv2.INTER_CUBIC)
+            plots = np.vstack((loss_plot, trans_plot, rot_plot))
 
-            first_row = np.hstack((tgt_frame, next_frame, warped_frame))
-            second_row = np.hstack((depth_img, sequential_diff_img, warped_diff_img))
-            first_col = np.vstack((first_row, second_row))
+            row_1 = np.hstack((tgt_frame, next_frame, warped_frame))
+
+            row_2 = np.hstack((depth_img, sequential_diff_img, warped_diff_img))
+
+            merged_tgt_seq = (0.5 * tgt_frame + 0.5 * next_frame).astype(np.uint8)
+            merged_seq_warp = (0.5 * next_frame + 0.5 * warped_frame).astype(np.uint8)
+            row_3 = np.hstack((np.zeros_like(merged_seq_warp), merged_tgt_seq, merged_seq_warp))
+
+            row_4 = np.hstack((np.zeros_like(merged_seq_warp), sequential_hs_diff_img, warped_hs_diff_img))
+
+            frames = np.vstack((row_1, row_2, row_3, row_4))
             # resize stacked frames to match plot size
-            first_col = cv2.resize(first_col, dsize=(int(second_col.shape[0] / 2) * 3, second_col.shape[0]),
-                                   interpolation=cv2.INTER_LINEAR)
+            frames = cv2.resize(frames, dsize=((plots.shape[0] // 4) * 3, plots.shape[0]),
+                                interpolation=cv2.INTER_CUBIC)
+
+            frame_labels = [["0-frame", "1-frame", "warped"],
+                            ["depth", "0f - 1f", "1f - warped"],
+                            ["", "0f/2 + 1f/2", "1f/2 + warped/2"],
+                            ["", "0f - 1f hs", "1f - warped hs"]]
+
+            for row, labels in enumerate(frame_labels):
+                for col, l in enumerate(labels):
+                    cv2.putText(img=frames,
+                                text=l,
+                                org=(
+                                    frames.shape[1] // 6 + col * frames.shape[1] // 3 - 5 * len(l),
+                                    15 + row * frames.shape[0] // 4),
+                                fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                                fontScale=0.5,
+                                color=(255, 0, 0),
+                                thickness=1,
+                                lineType=cv2.LINE_AA)
 
             for _ in range(repeated_frames):
-                output_video.append_data(np.concatenate((first_col, second_col), axis=1))
+                output_video.append_data(np.concatenate((frames, plots), axis=1))
 
 
 if __name__ == "__main__":
@@ -315,10 +368,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    result_imgs, losses, poses = generate_results(args.frames_root_path,
-                                                  args.pose_net_path,
-                                                  args.disp_net_path,
-                                                  args.seq_len,
-                                                  args.step)
+    result_imgs, valid_points_list, poses = generate_results(args.frames_root_path,
+                                                             args.pose_net_path,
+                                                             args.disp_net_path,
+                                                             args.seq_len,
+                                                             args.step)
 
-    create_video(args.output, result_imgs, losses, poses)
+    create_video(args.output, result_imgs, valid_points_list, poses)
