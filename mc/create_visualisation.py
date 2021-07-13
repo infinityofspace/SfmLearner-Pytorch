@@ -11,6 +11,7 @@ import torch
 from imageio import imread
 from matplotlib import pyplot as plt
 from matplotlib.ticker import FormatStrFormatter
+from scipy.optimize import optimize
 from scipy.spatial.transform import Rotation as R
 
 sys.path.append("..")
@@ -65,6 +66,8 @@ def pose_mat2vec(mat):
 
 class SeqFrames(object):
     def __init__(self, root_path: Path, file_ending=".png", seq_length=3, step=1):
+        assert root_path.exists()
+
         paths = [Path(p) for p in glob.glob(str(root_path.joinpath(f"*{file_ending}")))]
         paths.sort(key=lambda p: int(p.name[:p.name.rfind(".")]))
         self.image_paths = np.array(paths)
@@ -118,6 +121,7 @@ def generate_running_plot(x_values, x_label, x_ticks, y_values, y_label, y_ticks
 
     plt.grid()
 
+    fig.tight_layout()
     fig.canvas.draw()
     plot = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
     plot = plot.reshape(fig.canvas.get_width_height()[::-1] + (3,))
@@ -196,13 +200,13 @@ def generate_results(frames_root_path, pose_net_path, disp_net_path, seq_length=
         warped_frame = np.transpose((warped_frame_tensor.squeeze(0) * 0.5 + 0.5) * 255,
                                     (1, 2, 0)).detach().numpy().astype(np.uint8)
 
-        result_imgs.append((tgt_frame,
+        result_imgs.append([tgt_frame,
                             next_frame,
                             warped_frame,
-                            depth_img))
+                            depth_img])
         valid_points_list.append(np.transpose(valid_points.numpy(), (1, 2, 0)))
 
-    return np.array(result_imgs), np.array(valid_points_list), np.array(poses)
+    return result_imgs, valid_points_list, poses
 
 
 def convert_rgb_to_gray_rgb(img, max=3 * 255):
@@ -211,10 +215,44 @@ def convert_rgb_to_gray_rgb(img, max=3 * 255):
     return temp_img
 
 
+def rad(grad):
+    return grad * np.pi / 180
+
+
+def frame_to_tensor(frame):
+    return torch.from_numpy(np.transpose(frame, (2, 0, 1)).astype(np.float32)).unsqueeze(0)
+
+
+def tensor_to_frame(tensor):
+    return np.abs(np.transpose(tensor.squeeze(0), (1, 2, 0)).numpy()).astype(np.uint8)
+
+
+def grid_search_pose(rranges, pose_func, cur_frame, next_frame, depth, intrinsics):
+    def photometric_loss(val, *params):
+        img, next_img, depth, intrinsics, pose_func = params
+        pose = pose_func(val)
+        pose = torch.from_numpy(pose.astype(np.float32)).unsqueeze(0)
+        warped_img, valid_points = inverse_warp(img, depth, pose, intrinsics)
+
+        diff = (next_img - warped_img) * valid_points.unsqueeze(1).float()
+        return float(diff.abs().mean())
+
+    params = (cur_frame, next_frame, depth, intrinsics, pose_func)
+
+    res = optimize.brute(photometric_loss, rranges, args=params, full_output=True, finish=optimize.fmin)
+
+    return res
+
+
 def create_video(output_path, result_imgs, valid_points_list, poses, repeated_frames=1):
     diff_imgs = []
     losses = []
-    for (tgt_frame, next_frame, warped_frame, depth_img), valid_points in zip(result_imgs, valid_points_list):
+    hs_losses = []
+
+    for i in range(len(result_imgs)):
+        tgt_frame, next_frame, warped_frame, depth_img = result_imgs[i]
+        valid_points = valid_points_list[i]
+
         warped_diff = cv2.absdiff(next_frame, warped_frame) * valid_points
         warped_diff_img = convert_rgb_to_gray_rgb(warped_diff)
         photo_loss = np.abs(warped_diff).mean()
@@ -232,17 +270,66 @@ def create_video(output_path, result_imgs, valid_points_list, poses, repeated_fr
         next_frame_hsv[:, :, 2] = 0
         sequential_hs_diff = cv2.absdiff(tgt_frame_hsv, next_frame_hsv)
         sequential_hs_diff_img = convert_rgb_to_gray_rgb(sequential_hs_diff)
+        sequential_hs_photo_loss = np.abs(sequential_hs_diff).mean()
+        valid_points_sequential_hs_photo_loss = (np.abs(sequential_hs_diff) * valid_points).mean()
 
         warped_frame_hsv = cv2.cvtColor(warped_frame, cv2.COLOR_RGB2HSV)
         warped_frame_hsv[:, :, 2] = 0
         warped_hs_diff = cv2.absdiff(next_frame_hsv, warped_frame_hsv) * valid_points
         warped_hs_diff_img = convert_rgb_to_gray_rgb(warped_hs_diff)
+        hs_photo_loss = np.abs(warped_hs_diff).mean()
 
-        losses.append((photo_loss, sequential_photo_loss, valid_points_sequential_photo_loss))
-        diff_imgs.append((warped_diff_img, sequential_diff_img, sequential_hs_diff_img, warped_hs_diff_img))
+        rranges = (slice(-rad(10), rad(10), 0.001),)
+
+        depth_tensor = torch.from_numpy(np.expand_dims(cv2.cvtColor(depth_img, cv2.COLOR_RGB2GRAY),
+                                                       axis=0).astype(np.float32))
+
+        pose_func = lambda p: np.array([0, 0, 0, 0, p[0], 0])
+        grid_search_res = grid_search_pose(rranges,
+                                           pose_func,
+                                           frame_to_tensor(tgt_frame),
+                                           frame_to_tensor(next_frame),
+                                           depth_tensor,
+                                           INTRINSICS)
+
+        pose = torch.from_numpy(pose_func(grid_search_res[0]).astype(np.float32)).unsqueeze(0)
+
+        grid_search_warped, valid_points_grid_search = inverse_warp(frame_to_tensor(tgt_frame), depth_tensor, pose,
+                                                                    INTRINSICS)
+        grid_search_warped_img = tensor_to_frame(grid_search_warped)
+        valid_points_grid_search = np.transpose(valid_points_grid_search.numpy(), (1, 2, 0))
+
+        grid_search_warped_diff = cv2.absdiff(next_frame, grid_search_warped_img) * valid_points_grid_search
+        grid_search_warped_diff_img = convert_rgb_to_gray_rgb(grid_search_warped_diff)
+        grid_search_loss = np.abs(warped_diff).mean()
+
+        grid_search_warped_frame_hsv = cv2.cvtColor(grid_search_warped_diff_img, cv2.COLOR_RGB2HSV)
+        grid_search_warped_frame_hsv[:, :, 2] = 0
+        grid_search_warped_hs_diff = cv2.absdiff(next_frame_hsv, grid_search_warped_frame_hsv) * valid_points
+        grid_search_warped_hs_diff_img = convert_rgb_to_gray_rgb(grid_search_warped_hs_diff)
+        grid_search_hs_photo_loss = np.abs(grid_search_warped_hs_diff).mean()
+
+        losses.append((photo_loss, sequential_photo_loss, valid_points_sequential_photo_loss, grid_search_loss))
+        hs_losses.append((hs_photo_loss,
+                          sequential_hs_photo_loss,
+                          valid_points_sequential_hs_photo_loss,
+                          grid_search_hs_photo_loss))
+
+        diff_imgs.append((warped_diff_img,
+                          sequential_diff_img,
+                          sequential_hs_diff_img,
+                          warped_hs_diff_img,
+                          grid_search_warped_diff_img,
+                          grid_search_warped_hs_diff_img))
+
+        result_imgs[i].extend([grid_search_warped_img])
 
     losses = np.array(losses)
+    hs_losses = np.array(hs_losses)
     diff_imgs = np.array(diff_imgs)
+
+    result_imgs = np.array(result_imgs)
+    poses = np.array(poses)
 
     loss_std = losses.std(axis=0)
     loss_mean = losses.mean(axis=0)
@@ -276,8 +363,13 @@ def create_video(output_path, result_imgs, valid_points_list, poses, repeated_fr
     # write results as video
     with imageio.get_writer(output_path, mode="I") as output_video:
         for i, (result_frames, diff_imgs, valid_points) in enumerate(zip(result_imgs, diff_imgs, valid_points_list)):
-            tgt_frame, next_frame, warped_frame, depth_img = result_frames
-            warped_diff_img, sequential_diff_img, sequential_hs_diff_img, warped_hs_diff_img = diff_imgs
+            tgt_frame, next_frame, warped_frame, depth_img, grid_search_warped_img = result_frames
+            warped_diff_img, \
+            sequential_diff_img, \
+            sequential_hs_diff_img, \
+            warped_hs_diff_img, \
+            grid_search_warped_diff_img, \
+            grid_search_warped_hs_diff_img = diff_imgs
 
             warped_frame *= valid_points
 
@@ -292,7 +384,16 @@ def create_video(output_path, result_imgs, valid_points_list, poses, repeated_fr
                                               y_values=list(zip(*losses[idxs])),
                                               y_label="photo loss",
                                               y_ticks=np.linspace(0, loss_upper_bound, 10),
-                                              legend_labels=["1f - warped", "0f - 1f", "0f - 1f (valid points)"])
+                                              legend_labels=["1f - warped", "0f - 1f", "0f - 1f (valid points)",
+                                                             "grid"])
+
+            hs_loss_plot = generate_running_plot(x_values=x_values,
+                                                 x_label="n-th frame",
+                                                 x_ticks=x_ticks,
+                                                 y_values=list(zip(*hs_losses[idxs])),
+                                                 y_label="hs photo loss",
+                                                 y_ticks=np.linspace(0, loss_upper_bound, 10),
+                                                 legend_labels=["1f - warped", "0f - 1f", "0f - 1f (valid points)"])
 
             # generate tx, ty, tz running plot
             trans_plot = generate_running_plot(x_values=x_values,
@@ -312,28 +413,38 @@ def create_video(output_path, result_imgs, valid_points_list, poses, repeated_fr
                                              y_ticks=np.linspace(rot_lower_bound, rot_upper_bound, 10),
                                              legend_labels=["pitch", "yaw", "roll"])
 
-            video_height = 900
-            plot_size = (int(5 / 3 * video_height // 3), video_height // 3)
+            video_height = 1200
+            plot_size = (int(5 / 4 * video_height // 3), video_height // 4)
             # resize plots
             loss_plot = cv2.resize(loss_plot, dsize=plot_size, interpolation=cv2.INTER_CUBIC)
+            hs_loss_plot = cv2.resize(hs_loss_plot, dsize=plot_size, interpolation=cv2.INTER_CUBIC)
             trans_plot = cv2.resize(trans_plot, dsize=plot_size, interpolation=cv2.INTER_CUBIC)
             rot_plot = cv2.resize(rot_plot, dsize=plot_size, interpolation=cv2.INTER_CUBIC)
-            plots = np.vstack((loss_plot, trans_plot, rot_plot))
+            plots = np.vstack((trans_plot, rot_plot, loss_plot, hs_loss_plot))
 
-            row_1 = np.hstack((tgt_frame, next_frame, warped_frame))
-
-            row_2 = np.hstack((depth_img, sequential_diff_img, warped_diff_img))
+            row_1 = np.hstack((tgt_frame, next_frame, warped_frame, grid_search_warped_img))
 
             merged_tgt_seq = (0.5 * tgt_frame + 0.5 * next_frame).astype(np.uint8)
             merged_seq_warp = (0.5 * next_frame + 0.5 * warped_frame).astype(np.uint8)
-            row_3 = np.hstack((np.zeros_like(merged_seq_warp), merged_tgt_seq, merged_seq_warp))
+            merged_grid_search_warp = (0.5 * next_frame + 0.5 * grid_search_warped_img).astype(np.uint8)
+            row_2 = np.hstack((depth_img,
+                               merged_tgt_seq,
+                               merged_seq_warp,
+                               merged_grid_search_warp))
 
-            row_4 = np.hstack((np.zeros_like(merged_seq_warp), sequential_hs_diff_img, warped_hs_diff_img))
+            row_3 = np.hstack((np.zeros_like(sequential_diff_img),
+                               sequential_diff_img,
+                               warped_diff_img,
+                               grid_search_warped_diff_img))
+
+            row_4 = np.hstack((np.zeros_like(merged_seq_warp),
+                               sequential_hs_diff_img,
+                               warped_hs_diff_img,
+                               grid_search_warped_hs_diff_img))
 
             frames = np.vstack((row_1, row_2, row_3, row_4))
             # resize stacked frames to match plot size
-            frames = cv2.resize(frames, dsize=((plots.shape[0] // 4) * 3, plots.shape[0]),
-                                interpolation=cv2.INTER_CUBIC)
+            frames = cv2.resize(frames, dsize=(plots.shape[0], plots.shape[0]), interpolation=cv2.INTER_CUBIC)
 
             frame_labels = [["0-frame", "1-frame", "warped"],
                             ["depth", "0f - 1f", "1f - warped"],

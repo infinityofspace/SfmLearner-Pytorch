@@ -46,8 +46,8 @@ def main(processes, post_compress=True):
         root_output_path = root_output_path.joinpath("orig")
 
     tasks = []
-    for model in MODELS[:1]:
-        for dataset in DATASETS[:2]:
+    for model in MODELS:
+        for dataset in DATASETS:
             output_path = root_output_path.joinpath(
                 "{trained_on}-seq_len_{seq_len}-{dataset_name}.mp4".format(**model, dataset_name=dataset["name"]))
 
