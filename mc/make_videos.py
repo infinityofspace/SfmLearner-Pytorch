@@ -7,20 +7,16 @@ from pathlib import Path
 
 import tqdm
 
-from create_visualisation import generate_results, create_video
 from data import MODELS, DATASETS
+from mc import visualisation
 
 
 def make_video(params):
-    frames_root_path, pose_net_path, disp_net_path, seq_len, step, output, compress = params
+    frames_root_path, pose_net_path, disp_net_path, seq_len, step, output, compress, grid_search = params
 
-    result_imgs, valid_points_list, poses = generate_results(frames_root_path,
-                                                             pose_net_path,
-                                                             disp_net_path,
-                                                             seq_len,
-                                                             step)
-
-    create_video(output, result_imgs, valid_points_list, poses)
+    if not grid_search:
+        grid_search = {}
+    visualisation.main(frames_root_path, pose_net_path, disp_net_path, seq_len, step, output, **grid_search)
 
     output_path = Path(output)
     print(output_path, compress, output_path.exists())
@@ -47,7 +43,7 @@ def main(processes, post_compress=True):
 
     tasks = []
     for model in MODELS:
-        for dataset in DATASETS:
+        for dataset in DATASETS[3:4]:
             output_path = root_output_path.joinpath(
                 "{trained_on}-seq_len_{seq_len}-{dataset_name}.mp4".format(**model, dataset_name=dataset["name"]))
 
@@ -57,7 +53,8 @@ def main(processes, post_compress=True):
                           model["seq_len"],
                           step,
                           output_path,
-                          post_compress))
+                          post_compress,
+                          dataset.get("grid_search", None)))
 
     pool = Pool(processes=processes, initializer=setup_log)
     for _ in tqdm.tqdm(pool.imap_unordered(make_video, tasks), total=len(tasks)):

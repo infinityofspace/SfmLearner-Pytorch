@@ -430,7 +430,7 @@ def create_video_frames(grid_frames, labels, plots, video_height, video_width):
         plot_frame = np.vstack(plot_list)
 
         # resize
-        plots_size = (int(2 * video_height // len(plot_list)), video_height)
+        plots_size = (int(1.5 * video_height // len(plot_list)), video_height)
         plot_frame = cv2.resize(plot_frame, dsize=plots_size, interpolation=cv2.INTER_CUBIC)
 
         grid_frame = cv2.resize(grid_frame, dsize=(
@@ -466,24 +466,18 @@ def save_video(output_path, frames, repeated_frames=1):
                 output_video.append_data(frame)
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="")
-    parser.add_argument("frames_root_path", type=str, help="Path to root dir of frames")
-    parser.add_argument("pose_net_path", type=str, help="Path to trained PoseNet")
-    parser.add_argument("-d", "--disp-net-path", type=str, help="Path to trained DispNet")
-    parser.add_argument("-o", "--output", type=str, help="Path to output video file", default="video.mp4")
-    parser.add_argument("--seq-len", type=int, help="Sequence length", default=3)
-    parser.add_argument("--step", type=int, help="Number of steps", default=1)
-    parser.add_argument("--gs-tx", type=int, help="Grid search tx value with given range and step size", nargs=3)
-    parser.add_argument("--gs-ty", type=float, help="Grid search ty value with given range and step size", nargs=3)
-    parser.add_argument("--gs-tz", type=float, help="Grid search tz value with given range and step size", nargs=3)
-    parser.add_argument("--gs-pitch", type=float, help="Grid search pitch value with given range and step size",
-                        nargs=3)
-    parser.add_argument("--gs-yaw", type=float, help="Grid search yaw value with given range and step size", nargs=3)
-    parser.add_argument("--gs-roll", type=float, help="Grid search roll value with given range and step size", nargs=3)
-
-    args = parser.parse_args()
-
+def main(frames_root_path: str,
+         pose_net_path: str,
+         disp_net_path: str,
+         seq_len: int = 3,
+         step: int = 1,
+         output: str = "video.mp4",
+         gs_tx: typing.Union[float, float, float] = None,
+         gs_ty: typing.Union[float, float, float] = None,
+         gs_tz: typing.Union[float, float, float] = None,
+         gs_pitch: typing.Union[float, float, float] = None,
+         gs_yaw: typing.Union[float, float, float] = None,
+         gs_roll: typing.Union[float, float, float] = None):
     loss_legend = ["1f - warped", "0f - 1f", "0f - 1f (valid points)"]
 
     trans_plot_legend = ["tx", "ty", "tz"]
@@ -504,11 +498,11 @@ if __name__ == "__main__":
     print("sfmlearner predict")
 
     #  tgt_frames, next_frames, warped_frames, valid_points_list, poses, depth_imgs
-    predict_res = predict(args.frames_root_path,
-                          args.pose_net_path,
-                          args.disp_net_path,
-                          args.seq_len,
-                          args.step)
+    predict_res = predict(frames_root_path,
+                          pose_net_path,
+                          disp_net_path,
+                          seq_len,
+                          step)
 
     tgt_imgs = predict_res[0]
     next_imgs = predict_res[1]
@@ -530,7 +524,7 @@ if __name__ == "__main__":
     losses.append(photo_l)
     hs_losses.append(hs_photo_l)
 
-    if args.gs_tx or args.gs_ty or args.gs_tz or args.gs_pitch or args.gs_yaw or args.gs_roll:
+    if gs_tx or gs_ty or gs_tz or gs_pitch or gs_yaw or gs_roll:
         loss_legend.append("1f - grid search warped")
 
         trans_plot_legend.extend(["tx gs", "ty gs", "tz gs"])
@@ -546,28 +540,28 @@ if __name__ == "__main__":
         pose_idxs = [None, None, None, None, None, None]
         pose_idx_count = 0
 
-        if args.gs_tx:
-            rranges.append(slice(rad(args.gs_left[0]), rad(args.gs_left[1]), args.gs_left[2]))
+        if gs_tx:
+            rranges.append(slice(rad(gs_tx[0]), rad(gs_tx[1]), gs_tx[2]))
             pose_idxs[0] = pose_idx_count
             pose_idx_count += 1
-        if args.gs_ty:
-            rranges.append(slice(rad(args.gs_ty[0]), rad(args.gs_ty[1]), args.gs_ty[2]))
+        if gs_ty:
+            rranges.append(slice(rad(gs_ty[0]), rad(gs_ty[1]), gs_ty[2]))
             pose_idxs[1] = pose_idx_count
             pose_idx_count += 1
-        if args.gs_tz:
-            rranges.append(slice(rad(args.gs_tz[0]), rad(args.gs_tz[1]), args.gs_tz[2]))
+        if gs_tz:
+            rranges.append(slice(rad(gs_tz[0]), rad(gs_tz[1]), gs_tz[2]))
             pose_idxs[2] = pose_idx_count
             pose_idx_count += 1
-        if args.gs_pitch:
-            rranges.append(slice(rad(args.gs_pitch[0]), rad(args.gs_pitch[1]), args.gs_pitch[2]))
+        if gs_pitch:
+            rranges.append(slice(rad(gs_pitch[0]), rad(gs_pitch[1]), gs_pitch[2]))
             pose_idxs[3] = pose_idx_count
             pose_idx_count += 1
-        if args.gs_yaw:
-            rranges.append(slice(rad(args.gs_yaw[0]), rad(args.gs_yaw[1]), args.gs_yaw[2]))
+        if gs_yaw:
+            rranges.append(slice(rad(gs_yaw[0]), rad(gs_yaw[1]), gs_yaw[2]))
             pose_idxs[4] = pose_idx_count
             pose_idx_count += 1
-        if args.gs_roll:
-            rranges.append(slice(rad(args.gs_roll[0]), rad(args.gs_roll[1]), args.gs_roll[2]))
+        if gs_roll:
+            rranges.append(slice(rad(gs_roll[0]), rad(gs_roll[1]), gs_roll[2]))
             pose_idxs[5] = pose_idx_count
             pose_idx_count += 1
 
@@ -608,4 +602,36 @@ if __name__ == "__main__":
 
     frames = create_video_frames(grid_frames, grid_frame_labels, plots, 1200, 0)
 
-    save_video(args.output, frames)
+    save_video(output, frames)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="")
+    parser.add_argument("frames_root_path", type=str, help="Path to root dir of frames")
+    parser.add_argument("pose_net_path", type=str, help="Path to trained PoseNet")
+    parser.add_argument("-d", "--disp-net-path", type=str, help="Path to trained DispNet")
+    parser.add_argument("-o", "--output", type=str, help="Path to output video file", default="video.mp4")
+    parser.add_argument("--seq-len", type=int, help="Sequence length", default=3)
+    parser.add_argument("--step", type=int, help="Number of steps", default=1)
+    parser.add_argument("--gs-tx", type=int, help="Grid search tx value with given range and step size", nargs=3)
+    parser.add_argument("--gs-ty", type=float, help="Grid search ty value with given range and step size", nargs=3)
+    parser.add_argument("--gs-tz", type=float, help="Grid search tz value with given range and step size", nargs=3)
+    parser.add_argument("--gs-pitch", type=float, help="Grid search pitch value with given range and step size",
+                        nargs=3)
+    parser.add_argument("--gs-yaw", type=float, help="Grid search yaw value with given range and step size", nargs=3)
+    parser.add_argument("--gs-roll", type=float, help="Grid search roll value with given range and step size", nargs=3)
+
+    args = parser.parse_args()
+
+    main(args.frames_root_path,
+         args.pose_net_path,
+         args.disp_net_path,
+         args.seq_len,
+         args.step,
+         args.output,
+         args.gs_tx,
+         args.gs_ty,
+         args.gs_tz,
+         args.gs_pitch,
+         args.gs_yaw,
+         args.gs_roll)
