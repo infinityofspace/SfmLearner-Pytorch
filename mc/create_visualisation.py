@@ -32,6 +32,8 @@ INTRINSICS = torch.from_numpy(INTRINSICS.astype(np.float32)).unsqueeze(0)
 
 RUNNING_PLOT_RANGE = 20
 
+MARKERS = [".", "v", "^", "<", ">", "1", "2", "3", "4"]
+
 
 def load_pose_exp_net(posenet_path: str) -> PoseExpNet:
     weights = torch.load(posenet_path, map_location=device)
@@ -91,17 +93,22 @@ class SeqFrames(object):
         return len(self.image_paths)
 
 
-def generate_running_plot(x_values, x_label, x_ticks, y_values, y_label, y_ticks=None, legend_labels=None):
+def generate_running_plot(x_values, x_label, x_ticks, y_values, y_label, y_ticks=None, legend_labels=None,
+                          markers=None):
     fig, ax = plt.subplots()
     ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
 
     max_y_val = -np.inf
     min_y_val = np.inf
 
-    for y_vals in y_values:
-        max_y_val = max(max(y_vals), max_y_val)
-        min_y_val = min(min(y_vals), min_y_val)
-        plt.plot(x_values, y_vals)
+    for i, y_vals in enumerate(y_values):
+        if markers:
+            marker = markers[i]
+        else:
+            marker = None
+        max_y_val = max(np.max(y_vals), max_y_val)
+        min_y_val = min(np.min(y_vals), min_y_val)
+        plt.plot(x_values, y_vals, marker=marker)
 
     plt.xticks(x_ticks)
     plt.xlabel(x_label)
@@ -130,14 +137,17 @@ def generate_running_plot(x_values, x_label, x_ticks, y_values, y_label, y_ticks
     return plot
 
 
-def generate_results(frames_root_path, pose_net_path, disp_net_path, seq_length=3, step=1):
+def predict(frames_root_path, pose_net_path, disp_net_path, seq_length=3, step=1):
     pose_net = load_pose_exp_net(pose_net_path)
 
     disp_net = None
     if disp_net_path:
         disp_net = load_disp_net(disp_net_path)
 
-    result_imgs = []
+    tgt_frames = []
+    next_frames = []
+    warped_frames = []
+    depth_imgs = []
     valid_points_list = []
     poses = []
 
@@ -200,18 +210,25 @@ def generate_results(frames_root_path, pose_net_path, disp_net_path, seq_length=
         warped_frame = np.transpose((warped_frame_tensor.squeeze(0) * 0.5 + 0.5) * 255,
                                     (1, 2, 0)).detach().numpy().astype(np.uint8)
 
-        result_imgs.append([tgt_frame,
-                            next_frame,
-                            warped_frame,
-                            depth_img])
-        valid_points_list.append(np.transpose(valid_points.numpy(), (1, 2, 0)))
+        valid_points = np.transpose(valid_points.numpy(), (1, 2, 0))
 
-    return result_imgs, valid_points_list, poses
+        tgt_frames.append(tgt_frame)
+        next_frames.append(next_frame)
+        warped_frames.append(warped_frame * valid_points)
+        depth_imgs.append(depth_img)
+        valid_points_list.append(valid_points)
+
+    return tgt_frames, next_frames, warped_frames, valid_points_list, poses, depth_imgs
 
 
-def convert_rgb_to_gray_rgb(img, max=3 * 255):
-    temp_img = ((np.sum(img, axis=2) / max) * 255).astype(np.uint8)
+def convert_rgb_to_gray_rgb(img, max=3 * 255, color_map="gray"):
+    temp_img = ((np.sum(img.astype(np.float32), axis=2) / max) * 255).astype(np.uint8)
     temp_img = cv2.cvtColor(temp_img, cv2.COLOR_GRAY2RGB).astype(np.uint8)
+
+    # temp_img = (opencv_rainbow()(temp_img)[:, :, :3] * 255).astype(np.uint8)
+    #
+    # plt.imshow(temp_img)
+    # plt.show()
     return temp_img
 
 
@@ -227,245 +244,226 @@ def tensor_to_frame(tensor):
     return np.abs(np.transpose(tensor.squeeze(0), (1, 2, 0)).numpy()).astype(np.uint8)
 
 
-def grid_search_pose(rranges, pose_func, cur_frame, next_frame, depth, intrinsics):
-    def photometric_loss(val, *params):
-        img, next_img, depth, intrinsics, pose_func = params
-        pose = pose_func(val)
+def grid_search_pose(rranges, pose_idxs, cur_img, next_img, depth_img, intrinsics):
+    def photometric_loss(vals, *params):
+        img, next_img, depth, intrinsics, pose_idxs = params
+        pose = np.array([vals[idx] if idx is not None else 0 for idx in pose_idxs])
         pose = torch.from_numpy(pose.astype(np.float32)).unsqueeze(0)
         warped_img, valid_points = inverse_warp(img, depth, pose, intrinsics)
 
         diff = (next_img - warped_img) * valid_points.unsqueeze(1).float()
         return float(diff.abs().mean())
 
-    params = (cur_frame, next_frame, depth, intrinsics, pose_func)
+    depth_tensor = torch.from_numpy(
+        np.expand_dims(cv2.cvtColor(depth_img, cv2.COLOR_RGB2GRAY), axis=0).astype(np.float32))
+    cur_img_tensor = frame_to_tensor(cur_img)
+    next_img_tensor = frame_to_tensor(next_img)
+
+    params = (cur_img_tensor, next_img_tensor, depth_tensor, intrinsics, np.array(pose_idxs))
 
     res = optimize.brute(photometric_loss, rranges, args=params, full_output=True, finish=optimize.fmin)
 
-    return res
+    pose = np.array([res[0][idx] if idx is not None else 0 for idx in pose_idxs])
+    pose = torch.from_numpy(pose.astype(np.float32)).unsqueeze(0)
+
+    warped, valid_points = inverse_warp(cur_img_tensor, depth_tensor, pose, INTRINSICS)
+
+    valid_points = np.transpose(valid_points.numpy(), (1, 2, 0))
+
+    return cur_img, next_img, tensor_to_frame(warped) * valid_points, valid_points, pose.squeeze(0).numpy()
 
 
-def create_video(output_path, result_imgs, valid_points_list, poses, repeated_frames=1):
+def generate_diffs(next_frames, warped_frames, valid_points_list):
     diff_imgs = []
+    hsv_diff_imgs = []
+    warped_imgs = []
+    merged_imgs = []
     losses = []
     hs_losses = []
 
-    for i in range(len(result_imgs)):
-        tgt_frame, next_frame, warped_frame, depth_img = result_imgs[i]
-        valid_points = valid_points_list[i]
+    for next_frame, warped_frame, valid_points in zip(next_frames, warped_frames, valid_points_list):
+        warped_imgs.append(warped_frame)
 
         warped_diff = cv2.absdiff(next_frame, warped_frame) * valid_points
         warped_diff_img = convert_rgb_to_gray_rgb(warped_diff)
+        diff_imgs.append(warped_diff_img)
+
         photo_loss = np.abs(warped_diff).mean()
-
-        # sequential diff
-        sequential_diff = cv2.absdiff(tgt_frame, next_frame)
-        sequential_diff_img = convert_rgb_to_gray_rgb(sequential_diff)
-        sequential_photo_loss = np.abs(sequential_diff).mean()
-        valid_points_sequential_photo_loss = (np.abs(sequential_diff) * valid_points).mean()
-
-        ## hs diff
-        tgt_frame_hsv = cv2.cvtColor(tgt_frame, cv2.COLOR_RGB2HSV)
-        tgt_frame_hsv[:, :, 2] = 0
-        next_frame_hsv = cv2.cvtColor(next_frame, cv2.COLOR_RGB2HSV)
-        next_frame_hsv[:, :, 2] = 0
-        sequential_hs_diff = cv2.absdiff(tgt_frame_hsv, next_frame_hsv)
-        sequential_hs_diff_img = convert_rgb_to_gray_rgb(sequential_hs_diff)
-        sequential_hs_photo_loss = np.abs(sequential_hs_diff).mean()
-        valid_points_sequential_hs_photo_loss = (np.abs(sequential_hs_diff) * valid_points).mean()
+        losses.append(photo_loss)
 
         warped_frame_hsv = cv2.cvtColor(warped_frame, cv2.COLOR_RGB2HSV)
         warped_frame_hsv[:, :, 2] = 0
+        next_frame_hsv = cv2.cvtColor(next_frame, cv2.COLOR_RGB2HSV)
+        next_frame_hsv[:, :, 2] = 0
         warped_hs_diff = cv2.absdiff(next_frame_hsv, warped_frame_hsv) * valid_points
         warped_hs_diff_img = convert_rgb_to_gray_rgb(warped_hs_diff)
+        hsv_diff_imgs.append(warped_hs_diff_img)
+
         hs_photo_loss = np.abs(warped_hs_diff).mean()
+        hs_losses.append(hs_photo_loss)
 
-        rranges = (slice(-rad(10), rad(10), 0.001),)
+        merged_img = (0.5 * next_frame + 0.5 * warped_frame).astype(np.uint8)
+        merged_imgs.append(merged_img)
 
-        depth_tensor = torch.from_numpy(np.expand_dims(cv2.cvtColor(depth_img, cv2.COLOR_RGB2GRAY),
-                                                       axis=0).astype(np.float32))
+    return warped_imgs, merged_imgs, diff_imgs, hsv_diff_imgs, losses, hs_losses
 
-        pose_func = lambda p: np.array([0, 0, 0, 0, p[0], 0])
-        grid_search_res = grid_search_pose(rranges,
-                                           pose_func,
-                                           frame_to_tensor(tgt_frame),
-                                           frame_to_tensor(next_frame),
-                                           depth_tensor,
-                                           INTRINSICS)
 
-        pose = torch.from_numpy(pose_func(grid_search_res[0]).astype(np.float32)).unsqueeze(0)
-
-        grid_search_warped, valid_points_grid_search = inverse_warp(frame_to_tensor(tgt_frame), depth_tensor, pose,
-                                                                    INTRINSICS)
-        grid_search_warped_img = tensor_to_frame(grid_search_warped)
-        valid_points_grid_search = np.transpose(valid_points_grid_search.numpy(), (1, 2, 0))
-
-        grid_search_warped_diff = cv2.absdiff(next_frame, grid_search_warped_img) * valid_points_grid_search
-        grid_search_warped_diff_img = convert_rgb_to_gray_rgb(grid_search_warped_diff)
-        grid_search_loss = np.abs(warped_diff).mean()
-
-        grid_search_warped_frame_hsv = cv2.cvtColor(grid_search_warped_diff_img, cv2.COLOR_RGB2HSV)
-        grid_search_warped_frame_hsv[:, :, 2] = 0
-        grid_search_warped_hs_diff = cv2.absdiff(next_frame_hsv, grid_search_warped_frame_hsv) * valid_points
-        grid_search_warped_hs_diff_img = convert_rgb_to_gray_rgb(grid_search_warped_hs_diff)
-        grid_search_hs_photo_loss = np.abs(grid_search_warped_hs_diff).mean()
-
-        losses.append((photo_loss, sequential_photo_loss, valid_points_sequential_photo_loss, grid_search_loss))
-        hs_losses.append((hs_photo_loss,
-                          sequential_hs_photo_loss,
-                          valid_points_sequential_hs_photo_loss,
-                          grid_search_hs_photo_loss))
-
-        diff_imgs.append((warped_diff_img,
-                          sequential_diff_img,
-                          sequential_hs_diff_img,
-                          warped_hs_diff_img,
-                          grid_search_warped_diff_img,
-                          grid_search_warped_hs_diff_img))
-
-        result_imgs[i].extend([grid_search_warped_img])
-
+def generate_plots(losses, loss_legend, hs_losses, hs_loss_legend, poses, trans_legend, rot_legend):
     losses = np.array(losses)
     hs_losses = np.array(hs_losses)
-    diff_imgs = np.array(diff_imgs)
 
-    result_imgs = np.array(result_imgs)
     poses = np.array(poses)
 
     loss_std = losses.std(axis=0)
     loss_mean = losses.mean(axis=0)
 
-    loss_lower_bound = min(loss_mean) + min(loss_std)
+    loss_lower_bound = loss_mean.min() + loss_std.min()
     if len(np.where(losses < loss_lower_bound)) > len(losses) / 8:
-        loss_lower_bound -= min(loss_std) * 3
-    loss_upper_bound = max(loss_mean) + max(loss_std)
+        loss_lower_bound -= loss_std.min() * 3
+    loss_upper_bound = loss_mean.max() + loss_std.max()
     if len(np.where(losses > loss_upper_bound)) > len(losses) / 8:
-        loss_upper_bound += max(loss_std) * 3
+        loss_upper_bound += loss_std.max() * 3
 
     pose_std = poses.std(axis=0)
     pose_mean = poses.mean(axis=0)
 
-    trans_lower_bound = min(pose_mean[:3]) - np.abs(min(pose_std[:3]))
-    if len(np.where(poses[:3] < trans_lower_bound)) > len(poses) / 8:
-        trans_lower_bound -= np.abs(min(pose_std[:3])) * 3
-    trans_upper_bound = max(pose_mean[:3]) + max(pose_std[:3])
-    if len(np.where(poses[:3] > trans_upper_bound)) > len(poses) / 8:
-        trans_upper_bound += max(pose_std[:3]) * 3
+    trans_lower_bound = pose_mean[:, :3].min() - np.abs(pose_std[:, :3].min())
+    if len(np.where(poses[:, :3] < trans_lower_bound)) > len(poses) / 8:
+        trans_lower_bound -= np.abs(pose_std[:, :3].min()) * 3
+    trans_upper_bound = pose_mean[:, :3].max() + pose_std[:, :3].max()
+    if len(np.where(poses[:, :3] > trans_upper_bound)) > len(poses) / 8:
+        trans_upper_bound += pose_std[:, :3].max() * 3
 
-    rot_lower_bound = min(pose_mean[3:]) - np.abs(min(pose_std[3:]))
-    if len(np.where(poses[3:] < rot_lower_bound)) > len(poses) / 8:
-        rot_lower_bound -= np.abs(min(pose_std[3:])) * 3
-    rot_upper_bound = max(pose_mean[3:]) + max(pose_std[3:])
-    if len(np.where(poses[3:] > rot_upper_bound)) > len(poses) / 8:
-        rot_upper_bound += max(pose_std[3:]) * 3
+    rot_lower_bound = pose_mean[:, 3:].min() - np.abs(pose_std[:, 3:].min())
+    if len(np.where(poses[:, 3:] < rot_lower_bound)) > len(poses) / 8:
+        rot_lower_bound -= np.abs(pose_std[:, 3:].min()) * 3
+    rot_upper_bound = pose_mean[:, 3:].max() + pose_std[:, 3:].max()
+    if len(np.where(poses[:, 3:] > rot_upper_bound)) > len(poses) / 8:
+        rot_upper_bound += pose_std[:, 3:].max() * 3
 
     x_ticks = np.array(list(reversed(range(-RUNNING_PLOT_RANGE // 2, RUNNING_PLOT_RANGE // 2 + 1))))
 
-    # write results as video
-    with imageio.get_writer(output_path, mode="I") as output_video:
-        for i, (result_frames, diff_imgs, valid_points) in enumerate(zip(result_imgs, diff_imgs, valid_points_list)):
-            tgt_frame, next_frame, warped_frame, depth_img, grid_search_warped_img = result_frames
-            warped_diff_img, \
-            sequential_diff_img, \
-            sequential_hs_diff_img, \
-            warped_hs_diff_img, \
-            grid_search_warped_diff_img, \
-            grid_search_warped_hs_diff_img = diff_imgs
+    loss_plots = []
+    hs_loss_plots = []
+    trans_plots = []
+    rot_plots = []
 
-            warped_frame *= valid_points
+    for i in range(len(losses[0])):
+        idxs = x_ticks + i
+        valid_idxs = (idxs >= 0) & (idxs < len(losses[0]))
+        x_values = x_ticks[valid_idxs]
+        idxs = idxs[valid_idxs]
 
-            idxs = x_ticks + i
-            valid_idxs = (idxs >= 0) & (idxs < len(result_imgs))
-            x_values = x_ticks[valid_idxs]
-            idxs = idxs[valid_idxs]
+        loss_plot = generate_running_plot(x_values=x_values,
+                                          x_label="n-th frame",
+                                          x_ticks=x_ticks,
+                                          y_values=losses[:, idxs],
+                                          y_label="photo loss",
+                                          y_ticks=np.linspace(0, loss_upper_bound, 10),
+                                          legend_labels=loss_legend)
 
-            loss_plot = generate_running_plot(x_values=x_values,
-                                              x_label="n-th frame",
-                                              x_ticks=x_ticks,
-                                              y_values=list(zip(*losses[idxs])),
-                                              y_label="photo loss",
-                                              y_ticks=np.linspace(0, loss_upper_bound, 10),
-                                              legend_labels=["1f - warped", "0f - 1f", "0f - 1f (valid points)",
-                                                             "grid"])
+        loss_plots.append(loss_plot)
 
-            hs_loss_plot = generate_running_plot(x_values=x_values,
-                                                 x_label="n-th frame",
-                                                 x_ticks=x_ticks,
-                                                 y_values=list(zip(*hs_losses[idxs])),
-                                                 y_label="hs photo loss",
-                                                 y_ticks=np.linspace(0, loss_upper_bound, 10),
-                                                 legend_labels=["1f - warped", "0f - 1f", "0f - 1f (valid points)"])
-
-            # generate tx, ty, tz running plot
-            trans_plot = generate_running_plot(x_values=x_values,
-                                               x_label="n-th frame",
-                                               x_ticks=x_ticks,
-                                               y_values=list(zip(*[p[:3] for p in poses[idxs]])),
-                                               y_label="translation",
-                                               y_ticks=np.linspace(trans_lower_bound, trans_upper_bound, 10),
-                                               legend_labels=["tx", "ty", "tz"])
-
-            # generate yaw, pitch, roll running plot
-            rot_plot = generate_running_plot(x_values=x_values,
+        hs_loss_plot = generate_running_plot(x_values=x_values,
                                              x_label="n-th frame",
                                              x_ticks=x_ticks,
-                                             y_values=list(zip(*[p[3:] for p in poses[idxs]])),
-                                             y_label="rotation",
-                                             y_ticks=np.linspace(rot_lower_bound, rot_upper_bound, 10),
-                                             legend_labels=["pitch", "yaw", "roll"])
+                                             y_values=hs_losses[:, idxs],
+                                             y_label="hs photo loss",
+                                             y_ticks=np.linspace(0, loss_upper_bound, 10),
+                                             legend_labels=hs_loss_legend)
 
-            video_height = 1200
-            plot_size = (int(5 / 4 * video_height // 3), video_height // 4)
-            # resize plots
-            loss_plot = cv2.resize(loss_plot, dsize=plot_size, interpolation=cv2.INTER_CUBIC)
-            hs_loss_plot = cv2.resize(hs_loss_plot, dsize=plot_size, interpolation=cv2.INTER_CUBIC)
-            trans_plot = cv2.resize(trans_plot, dsize=plot_size, interpolation=cv2.INTER_CUBIC)
-            rot_plot = cv2.resize(rot_plot, dsize=plot_size, interpolation=cv2.INTER_CUBIC)
-            plots = np.vstack((trans_plot, rot_plot, loss_plot, hs_loss_plot))
+        hs_loss_plots.append(hs_loss_plot)
 
-            row_1 = np.hstack((tgt_frame, next_frame, warped_frame, grid_search_warped_img))
+        # generate tx, ty, tz running plot
+        trans_y_vals = [list(zip(*p[idxs][:, :3])) for p in poses]
+        trans_y_vals = [val for sub in trans_y_vals for val in sub]
 
-            merged_tgt_seq = (0.5 * tgt_frame + 0.5 * next_frame).astype(np.uint8)
-            merged_seq_warp = (0.5 * next_frame + 0.5 * warped_frame).astype(np.uint8)
-            merged_grid_search_warp = (0.5 * next_frame + 0.5 * grid_search_warped_img).astype(np.uint8)
-            row_2 = np.hstack((depth_img,
-                               merged_tgt_seq,
-                               merged_seq_warp,
-                               merged_grid_search_warp))
+        # more than one model
+        if len(trans_y_vals) > 3:
+            markers = [idx for sub in [MARKERS[i] * 3 for i in range(len(trans_y_vals) // 3)] for idx in sub]
+        else:
+            markers = None
 
-            row_3 = np.hstack((np.zeros_like(sequential_diff_img),
-                               sequential_diff_img,
-                               warped_diff_img,
-                               grid_search_warped_diff_img))
+        trans_plot = generate_running_plot(x_values=x_values,
+                                           x_label="n-th frame",
+                                           x_ticks=x_ticks,
+                                           y_values=trans_y_vals,
+                                           y_label="translation",
+                                           y_ticks=np.linspace(trans_lower_bound, trans_upper_bound, 10),
+                                           legend_labels=trans_legend,
+                                           markers=markers)
 
-            row_4 = np.hstack((np.zeros_like(merged_seq_warp),
-                               sequential_hs_diff_img,
-                               warped_hs_diff_img,
-                               grid_search_warped_hs_diff_img))
+        trans_plots.append(trans_plot)
 
-            frames = np.vstack((row_1, row_2, row_3, row_4))
-            # resize stacked frames to match plot size
-            frames = cv2.resize(frames, dsize=(plots.shape[0], plots.shape[0]), interpolation=cv2.INTER_CUBIC)
+        # generate yaw, pitch, roll running plot
+        rot_y_vals = [list(zip(*p[idxs][:, 3:])) for p in poses]
+        rot_y_vals = [val for sub in rot_y_vals for val in sub]
 
-            frame_labels = [["0-frame", "1-frame", "warped"],
-                            ["depth", "0f - 1f", "1f - warped"],
-                            ["", "0f/2 + 1f/2", "1f/2 + warped/2"],
-                            ["", "0f - 1f hs", "1f - warped hs"]]
+        # more than one model
+        if len(trans_y_vals) > 3:
+            markers = [idx for sub in [MARKERS[i] * 3 for i in range(len(trans_y_vals) // 3)] for idx in sub]
+        else:
+            markers = None
 
-            for row, labels in enumerate(frame_labels):
-                for col, l in enumerate(labels):
-                    cv2.putText(img=frames,
-                                text=l,
-                                org=(
-                                    frames.shape[1] // 6 + col * frames.shape[1] // 3 - 5 * len(l),
-                                    15 + row * frames.shape[0] // 4),
-                                fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                                fontScale=0.5,
-                                color=(255, 0, 0),
-                                thickness=1,
-                                lineType=cv2.LINE_AA)
+        rot_plot = generate_running_plot(x_values=x_values,
+                                         x_label="n-th frame",
+                                         x_ticks=x_ticks,
+                                         y_values=rot_y_vals,
+                                         y_label="rotation",
+                                         y_ticks=np.linspace(rot_lower_bound, rot_upper_bound, 10),
+                                         legend_labels=rot_legend,
+                                         markers=markers)
 
+        rot_plots.append(rot_plot)
+
+        # plt.imshow(rot_plot)
+        # plt.show()
+
+    return loss_plots, hs_loss_plots, trans_plots, rot_plots
+
+
+def create_video_frames(grid_frames, labels, plots, video_height, video_width):
+    frames = []
+
+    for grid_list, plot_list in zip(grid_frames, plots):
+        grid_frame = np.vstack([np.hstack(row) for row in grid_list])
+        plot_frame = np.vstack(plot_list)
+
+        # resize
+        plots_size = (int(2 * video_height // len(plot_list)), video_height)
+        plot_frame = cv2.resize(plot_frame, dsize=plots_size, interpolation=cv2.INTER_CUBIC)
+
+        grid_frame = cv2.resize(grid_frame, dsize=(
+            (plot_frame.shape[0] // len(grid_list)) * len(grid_list[0]), plot_frame.shape[0]),
+                                interpolation=cv2.INTER_CUBIC)
+
+        # add labels
+        for row, labels_list in enumerate(labels):
+            for col, l in enumerate(labels_list):
+                block_size = grid_frame.shape[1] // len(labels_list)
+                cv2.putText(img=grid_frame,
+                            text=l,
+                            org=(block_size // 2 + col * block_size - 4 * len(l),
+                                 15 + row * grid_frame.shape[0] // len(labels_list)),
+                            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                            fontScale=0.5,
+                            color=(255, 0, 0),
+                            thickness=1,
+                            lineType=cv2.LINE_AA)
+
+        frame = np.concatenate((grid_frame, plot_frame), axis=1)
+
+        frames.append(frame)
+
+    return frames
+
+
+def save_video(output_path, frames, repeated_frames=1):
+    # write results as video
+    with imageio.get_writer(output_path, mode="I") as output_video:
+        for frame in frames:
             for _ in range(repeated_frames):
-                output_video.append_data(np.concatenate((frames, plots), axis=1))
+                output_video.append_data(frame)
 
 
 if __name__ == "__main__":
@@ -475,14 +473,139 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--disp-net-path", type=str, help="Path to trained DispNet")
     parser.add_argument("-o", "--output", type=str, help="Path to output video file", default="video.mp4")
     parser.add_argument("--seq-len", type=int, help="Sequence length", default=3)
-    parser.add_argument("--step", type=int, help="Number of step", default=1)
+    parser.add_argument("--step", type=int, help="Number of steps", default=1)
+    parser.add_argument("--gs-tx", type=int, help="Grid search tx value with given range and step size", nargs=3)
+    parser.add_argument("--gs-ty", type=float, help="Grid search ty value with given range and step size", nargs=3)
+    parser.add_argument("--gs-tz", type=float, help="Grid search tz value with given range and step size", nargs=3)
+    parser.add_argument("--gs-pitch", type=float, help="Grid search pitch value with given range and step size",
+                        nargs=3)
+    parser.add_argument("--gs-yaw", type=float, help="Grid search yaw value with given range and step size", nargs=3)
+    parser.add_argument("--gs-roll", type=float, help="Grid search roll value with given range and step size", nargs=3)
 
     args = parser.parse_args()
 
-    result_imgs, valid_points_list, poses = generate_results(args.frames_root_path,
-                                                             args.pose_net_path,
-                                                             args.disp_net_path,
-                                                             args.seq_len,
-                                                             args.step)
+    loss_legend = ["1f - warped", "0f - 1f", "0f - 1f (valid points)"]
 
-    create_video(args.output, result_imgs, valid_points_list, poses)
+    trans_plot_legend = ["tx", "ty", "tz"]
+    rot_plot_legend = ["pitch", "yaw", "roll"]
+
+    grid_frame_labels = [["0-frame", "1-frame", "warped"],
+                         ["depth", "0f - 1f", "1f - warped"],
+                         ["", "0f/2 + 1f/2", "1f/2 + warped/2"],
+                         ["", "0f - 1f hs", "1f - warped hs"]]
+
+    losses = []
+    hs_losses = []
+    poses = []
+
+    # warped_imgs, merged_imgs, diff_imgs, hsv_diff_imgs
+    result_imgs = []
+
+    print("sfmlearner predict")
+
+    #  tgt_frames, next_frames, warped_frames, valid_points_list, poses, depth_imgs
+    predict_res = predict(args.frames_root_path,
+                          args.pose_net_path,
+                          args.disp_net_path,
+                          args.seq_len,
+                          args.step)
+
+    tgt_imgs = predict_res[0]
+    next_imgs = predict_res[1]
+    depths = predict_res[5]
+    poses.append(predict_res[4])
+
+    *diff_imgs, photo_l, hs_photo_l = generate_diffs(tgt_imgs, next_imgs, np.ones_like(next_imgs))
+    result_imgs.append(diff_imgs)
+    losses.append(photo_l)
+    hs_losses.append(hs_photo_l)
+
+    # sequential diff with valid_points
+    *_, photo_l, hs_photo_l = generate_diffs(tgt_imgs, next_imgs, predict_res[3])
+    losses.append(photo_l)
+    hs_losses.append(hs_photo_l)
+
+    *diff_imgs, photo_l, hs_photo_l = generate_diffs(next_imgs, predict_res[2], predict_res[3])
+    result_imgs.append(diff_imgs)
+    losses.append(photo_l)
+    hs_losses.append(hs_photo_l)
+
+    if args.gs_tx or args.gs_ty or args.gs_tz or args.gs_pitch or args.gs_yaw or args.gs_roll:
+        loss_legend.append("1f - grid search warped")
+
+        trans_plot_legend.extend(["tx gs", "ty gs", "tz gs"])
+        rot_plot_legend.extend(["pitch gs", "yaw gs", "roll gs"])
+
+        labels = [["grid search warped"], ["1f - gs warped"], ["1f/2 + gs warped/2"], ["1f - gs warped"]]
+
+        grid_frame_labels = [row + labels[i] for i, row in enumerate(grid_frame_labels)]
+
+        print("grid search predict")
+        # grid search
+        rranges = []
+        pose_idxs = [None, None, None, None, None, None]
+        pose_idx_count = 0
+
+        if args.gs_tx:
+            rranges.append(slice(rad(args.gs_left[0]), rad(args.gs_left[1]), args.gs_left[2]))
+            pose_idxs[0] = pose_idx_count
+            pose_idx_count += 1
+        if args.gs_ty:
+            rranges.append(slice(rad(args.gs_ty[0]), rad(args.gs_ty[1]), args.gs_ty[2]))
+            pose_idxs[1] = pose_idx_count
+            pose_idx_count += 1
+        if args.gs_tz:
+            rranges.append(slice(rad(args.gs_tz[0]), rad(args.gs_tz[1]), args.gs_tz[2]))
+            pose_idxs[2] = pose_idx_count
+            pose_idx_count += 1
+        if args.gs_pitch:
+            rranges.append(slice(rad(args.gs_pitch[0]), rad(args.gs_pitch[1]), args.gs_pitch[2]))
+            pose_idxs[3] = pose_idx_count
+            pose_idx_count += 1
+        if args.gs_yaw:
+            rranges.append(slice(rad(args.gs_yaw[0]), rad(args.gs_yaw[1]), args.gs_yaw[2]))
+            pose_idxs[4] = pose_idx_count
+            pose_idx_count += 1
+        if args.gs_roll:
+            rranges.append(slice(rad(args.gs_roll[0]), rad(args.gs_roll[1]), args.gs_roll[2]))
+            pose_idxs[5] = pose_idx_count
+            pose_idx_count += 1
+
+        rranges = tuple(rranges)
+
+        warped_imgs = []
+        valid_points = []
+        poses_list = []
+        for img, seq_img, depth_img in zip(tgt_imgs, next_imgs, depths):
+            # cur_img, next_img, tensor_to_frame(warped) * valid_points, valid_points, pose.squeeze(0).numpy()
+            _, _, warped, v_points, ps = grid_search_pose(rranges, pose_idxs, img, seq_img, depth_img,
+                                                          INTRINSICS)
+            warped_imgs.append(warped)
+            valid_points.append(v_points)
+            poses_list.append(ps)
+
+        poses.append(poses_list)
+
+        *diff_imgs, photo_l, hs_photo_l = generate_diffs(next_imgs, warped_imgs, valid_points)
+        result_imgs.append(diff_imgs)
+        losses.append(photo_l)
+        hs_losses.append(hs_photo_l)
+
+    plots = list(zip(*generate_plots(losses, loss_legend,
+                                     hs_losses, loss_legend,
+                                     poses, trans_plot_legend, rot_plot_legend)))
+
+    grid_frames = []
+
+    for i in range(len(tgt_imgs)):
+        frame = [[tgt_imgs[i]], [depths[i]], [np.zeros_like(tgt_imgs[i])], [np.zeros_like(tgt_imgs[i])]]
+
+        for res in result_imgs:
+            for row, imgs in enumerate(res):
+                frame[row].append(imgs[i])
+
+        grid_frames.append(frame)
+
+    frames = create_video_frames(grid_frames, grid_frame_labels, plots, 1200, 0)
+
+    save_video(args.output, frames)
