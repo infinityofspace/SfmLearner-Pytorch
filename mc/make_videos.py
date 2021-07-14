@@ -8,7 +8,7 @@ from pathlib import Path
 import tqdm
 
 from data import MODELS, DATASETS
-from mc import visualisation
+import visualisation
 
 
 def make_video(params):
