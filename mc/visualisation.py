@@ -444,7 +444,7 @@ def create_video_frames(grid_frames, labels, plots, video_height, video_width):
                 cv2.putText(img=grid_frame,
                             text=l,
                             org=(block_size // 2 + col * block_size - 4 * len(l),
-                                 15 + row * grid_frame.shape[0] // len(labels_list)),
+                                 15 + row * grid_frame.shape[1] // len(labels_list)),
                             fontFace=cv2.FONT_HERSHEY_SIMPLEX,
                             fontScale=0.5,
                             color=(255, 0, 0),
