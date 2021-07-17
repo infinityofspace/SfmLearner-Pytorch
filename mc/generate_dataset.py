@@ -1,7 +1,9 @@
 import random
+import shutil
 from pathlib import Path
 
 import minerl
+import cv2
 import gym
 import imageio
 import numpy as np
@@ -100,7 +102,8 @@ dataset_actions = [
                        }
                    ] * 500,
         "action_folder_name": "forward",
-        "samples": 30
+        "samples": 5,
+        "min_frames": 120
     },
     {
         "actions": [
@@ -109,7 +112,8 @@ dataset_actions = [
                        }
                    ] * 500,
         "action_folder_name": "back",
-        "samples": 30
+        "samples": 5,
+        "min_frames": 120
     },
     {
         "actions": [
@@ -118,7 +122,8 @@ dataset_actions = [
                        }
                    ] * 500,
         "action_folder_name": "left",
-        "samples": 30
+        "samples": 5,
+        "min_frames": 120
     },
     {
         "actions": [
@@ -127,7 +132,8 @@ dataset_actions = [
                        }
                    ] * 500,
         "action_folder_name": "right",
-        "samples": 30
+        "samples": 5,
+        "min_frames": 120
     },
     {
         "actions": [
@@ -136,7 +142,8 @@ dataset_actions = [
                        }
                    ] * 500,
         "action_folder_name": "jump",
-        "samples": 5
+        "samples": 5,
+        "min_frames": 120
     },
     {
         "actions": random_translation_actions,
@@ -151,7 +158,8 @@ dataset_actions = [
 ]
 
 for action_dict in dataset_actions:
-    for sample in range(action_dict["samples"]):
+    sample = 0
+    while sample < action_dict["samples"]:
         obs = env.reset()
 
         sample_dir_path = root_dataset_dir_path.joinpath(action_dict["action_folder_name"], str(sample))
@@ -162,13 +170,28 @@ for action_dict in dataset_actions:
 
         sample_actions = []
 
+        invalid_sample = False
+
         i = 0
         action = env.action_space.noop()
 
         try:
             obs, reward, done, info = env.step(action)
+
+            last_pov = None
+
             for act in action_dict["actions"]:
-                if imageio.imwrite(str(frames_dir_path.joinpath(str(i))) + ".png", obs["pov"]):
+                cur_pov = obs["pov"]
+
+                if "min_frames" in action_dict and last_pov is not None and i < action_dict["min_frames"] and np.abs(
+                        cv2.absdiff(last_pov, cur_pov)).mean() < 0.01:
+                    invalid_sample = True
+                    # reset env to get min number of frames
+                    break
+
+                last_pov = cur_pov
+
+                if imageio.imwrite(str(frames_dir_path.joinpath(str(i))) + ".png", cur_pov):
                     raise Exception("Could not save image")
 
                 action.update(act)
@@ -180,4 +203,8 @@ for action_dict in dataset_actions:
         except RuntimeError as e:
             print(e)
         finally:
-            np.save(str(sample_dir_path.joinpath("actions.npy")), np.array(sample_actions))
+            if invalid_sample:
+                shutil.rmtree(sample_dir_path)
+            else:
+                np.save(str(sample_dir_path.joinpath("actions.npy")), np.array(sample_actions))
+                sample += 1
