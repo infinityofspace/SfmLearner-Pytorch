@@ -172,14 +172,16 @@ for action_dict in dataset_actions:
         invalid_sample = False
 
         i = 0
-        action = env.action_space.noop()
 
         try:
+            action = env.action_space.noop()
             obs, reward, done, info = env.step(action)
 
             last_pov = None
 
             for act in action_dict["actions"]:
+                action = env.action_space.noop()
+
                 cur_pov = obs["pov"]
 
                 if "min_frames" in action_dict and last_pov is not None and i < action_dict["min_frames"] and np.abs(
