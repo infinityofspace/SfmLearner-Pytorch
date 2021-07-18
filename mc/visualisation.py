@@ -1,6 +1,7 @@
 import argparse
 import glob
 import sys
+import time
 import typing
 from pathlib import Path
 
@@ -151,6 +152,8 @@ def predict(frames_root_path, pose_net_path, disp_net_path, seq_length=3, step=1
     valid_points_list = []
     poses = []
 
+    calc_timings = []
+
     for i, seq_frames in enumerate(SeqFrames(Path(frames_root_path), seq_length=seq_length, step=step)):
         imgs = [np.transpose(img, (2, 0, 1)) for img in seq_frames]
 
@@ -168,13 +171,21 @@ def predict(frames_root_path, pose_net_path, disp_net_path, seq_length=3, step=1
         pred_disp = None
         depth_img = np.zeros((64, 64, 3), dtype=np.uint8)
 
+        disp_net_calc_time = None
+
         if disp_net_path:
+            start_time = time.time()
             pred_disp = disp_net(tgt_img)[0]
+            disp_net_calc_time = time.time() - start_time
 
             depth_img = pred_disp.squeeze(0).detach().numpy()
             depth_img = cv2.cvtColor((depth_img / 10) * 255, cv2.COLOR_GRAY2BGR).astype(np.uint8)
 
+        start_time = time.time()
         _, img_poses = pose_net(tgt_img, ref_imgs)
+        pose_net_calc_time = time.time() - start_time
+
+        calc_timings.append((disp_net_calc_time, pose_net_calc_time))
 
         img_poses = img_poses.cpu()[0]
         img_poses = torch.cat([img_poses[:len(imgs) // 2], torch.zeros(1, 6).float(), img_poses[len(imgs) // 2:]])
@@ -218,17 +229,13 @@ def predict(frames_root_path, pose_net_path, disp_net_path, seq_length=3, step=1
         depth_imgs.append(depth_img)
         valid_points_list.append(valid_points)
 
-    return tgt_frames, next_frames, warped_frames, valid_points_list, poses, depth_imgs
+    return tgt_frames, next_frames, warped_frames, valid_points_list, poses, depth_imgs, calc_timings
 
 
 def convert_rgb_to_gray_rgb(img, max=3 * 255, color_map="gray"):
     temp_img = ((np.sum(img.astype(np.float32), axis=2) / max) * 255).astype(np.uint8)
     temp_img = cv2.cvtColor(temp_img, cv2.COLOR_GRAY2RGB).astype(np.uint8)
 
-    # temp_img = (opencv_rainbow()(temp_img)[:, :, :3] * 255).astype(np.uint8)
-    #
-    # plt.imshow(temp_img)
-    # plt.show()
     return temp_img
 
 
@@ -261,7 +268,9 @@ def grid_search_pose(rranges, pose_idxs, cur_img, next_img, depth_img, intrinsic
 
     params = (cur_img_tensor, next_img_tensor, depth_tensor, intrinsics, np.array(pose_idxs))
 
+    start_time = time.time()
     res = optimize.brute(photometric_loss, rranges, args=params, full_output=True, finish=optimize.fmin)
+    calc_time = time.time() - start_time
 
     pose = np.array([res[0][idx] if idx is not None else 0 for idx in pose_idxs])
     pose = torch.from_numpy(pose.astype(np.float32)).unsqueeze(0)
@@ -270,7 +279,7 @@ def grid_search_pose(rranges, pose_idxs, cur_img, next_img, depth_img, intrinsic
 
     valid_points = np.transpose(valid_points.numpy(), (1, 2, 0))
 
-    return cur_img, next_img, tensor_to_frame(warped) * valid_points, valid_points, pose.squeeze(0).numpy()
+    return cur_img, next_img, tensor_to_frame(warped) * valid_points, valid_points, pose.squeeze(0).numpy(), calc_time
 
 
 def generate_diffs(next_frames, warped_frames, valid_points_list):
@@ -416,9 +425,6 @@ def generate_plots(losses, loss_legend, hs_losses, hs_loss_legend, poses, trans_
 
         rot_plots.append(rot_plot)
 
-        # plt.imshow(rot_plot)
-        # plt.show()
-
     return loss_plots, hs_loss_plots, trans_plots, rot_plots
 
 
@@ -477,7 +483,8 @@ def main(frames_root_path: str,
          gs_tz: typing.Union[float, float, float] = None,
          gs_pitch: typing.Union[float, float, float] = None,
          gs_yaw: typing.Union[float, float, float] = None,
-         gs_roll: typing.Union[float, float, float] = None):
+         gs_roll: typing.Union[float, float, float] = None,
+         timings: bool = False):
     loss_legend = ["1f - warped", "0f - 1f", "0f - 1f (valid points)"]
 
     trans_plot_legend = ["tx", "ty", "tz"]
@@ -498,11 +505,20 @@ def main(frames_root_path: str,
     print("sfmlearner predict")
 
     #  tgt_frames, next_frames, warped_frames, valid_points_list, poses, depth_imgs
-    predict_res = predict(frames_root_path,
-                          pose_net_path,
-                          disp_net_path,
-                          seq_len,
-                          step)
+    *predict_res, nn_calc_timings = predict(frames_root_path,
+                                            pose_net_path,
+                                            disp_net_path,
+                                            seq_len,
+                                            step)
+
+    if timings:
+        n_images = len(predict_res[0])
+        total_disp_net_calc_time = sum([calc_times[0] for calc_times in nn_calc_timings])
+        total_pose_net_calc_time = sum([calc_times[1] for calc_times in nn_calc_timings])
+        print("avg disp net calc time: {:.3f} \tavg pose net calc time: {:.3f}".format(
+            total_disp_net_calc_time / n_images,
+            total_pose_net_calc_time / n_images))
+        print("total nn calc time: {:.3f}".format(total_disp_net_calc_time + total_pose_net_calc_time))
 
     tgt_imgs = predict_res[0]
     next_imgs = predict_res[1]
@@ -523,6 +539,8 @@ def main(frames_root_path: str,
     result_imgs.append(diff_imgs)
     losses.append(photo_l)
     hs_losses.append(hs_photo_l)
+
+    total_grid_search_calc_time = 0
 
     if gs_tx or gs_ty or gs_tz or gs_pitch or gs_yaw or gs_roll:
         loss_legend.append("1f - grid search warped")
@@ -570,13 +588,20 @@ def main(frames_root_path: str,
         warped_imgs = []
         valid_points = []
         poses_list = []
+        grid_search_calc_timings = []
         for img, seq_img, depth_img in zip(tgt_imgs, next_imgs, depths):
             # cur_img, next_img, tensor_to_frame(warped) * valid_points, valid_points, pose.squeeze(0).numpy()
-            _, _, warped, v_points, ps = grid_search_pose(rranges, pose_idxs, img, seq_img, depth_img,
-                                                          INTRINSICS)
+            _, _, warped, v_points, ps, calc_timing = grid_search_pose(rranges, pose_idxs, img, seq_img, depth_img,
+                                                                       INTRINSICS)
             warped_imgs.append(warped)
             valid_points.append(v_points)
             poses_list.append(ps)
+            grid_search_calc_timings.append(calc_timing)
+
+        if timings:
+            total_grid_search_calc_time = sum(grid_search_calc_timings)
+            print("avg gs calc time: {:.3f}".format(total_grid_search_calc_time / len(tgt_imgs)))
+            print("total gs calc time: {:.3f}".format(total_grid_search_calc_time))
 
         poses.append(poses_list)
 
@@ -584,6 +609,10 @@ def main(frames_root_path: str,
         result_imgs.append(diff_imgs)
         losses.append(photo_l)
         hs_losses.append(hs_photo_l)
+
+    if timings:
+        print("total calc time: {:.3f}".format(
+            total_disp_net_calc_time + total_pose_net_calc_time + total_grid_search_calc_time))
 
     plots = list(zip(*generate_plots(losses, loss_legend,
                                      hs_losses, loss_legend,
@@ -620,6 +649,7 @@ if __name__ == "__main__":
                         nargs=3)
     parser.add_argument("--gs-yaw", type=float, help="Grid search yaw value with given range and step size", nargs=3)
     parser.add_argument("--gs-roll", type=float, help="Grid search roll value with given range and step size", nargs=3)
+    parser.add_argument("--timings", help="print the calculation timings", action="store_true")
 
     args = parser.parse_args()
 
@@ -634,4 +664,5 @@ if __name__ == "__main__":
          args.gs_tz,
          args.gs_pitch,
          args.gs_yaw,
-         args.gs_roll)
+         args.gs_roll,
+         args.timings)

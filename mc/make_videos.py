@@ -7,8 +7,8 @@ from pathlib import Path
 
 import tqdm
 
-from data import MODELS, DATASETS
 import visualisation
+from data import MODELS, DATASETS
 
 
 def make_video(params):
@@ -16,10 +16,11 @@ def make_video(params):
 
     if not grid_search:
         grid_search = {}
-    visualisation.main(frames_root_path, pose_net_path, disp_net_path, seq_len, step, output, **grid_search)
+    visualisation.main(frames_root_path, pose_net_path, disp_net_path, seq_len, step, output, **grid_search,
+                       timings=True)
 
     output_path = Path(output)
-    print(output_path, compress, output_path.exists())
+    print(output_path)
     if compress and output_path.exists():
         subprocess.call(
             ["ffmpeg", "-i", output, "-vcodec", "libx265", "-crf", "30", f"videos/compressed/{output_path.name}"],
