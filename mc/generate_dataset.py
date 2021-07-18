@@ -8,7 +8,7 @@ import gym
 import imageio
 import numpy as np
 
-root_dataset_dir_path = Path("mc_predefinied_agent_actions_v3")
+root_dataset_dir_path = Path("mc_predefined_agent_actions_v3")
 
 env = gym.make("MineRLTreechop-v0")
 
@@ -30,12 +30,11 @@ for _ in range(200):
 
 random_rotation_actions = []
 for _ in range(200):
-    pitch = random.uniform(-90, 90)
-    yaw = random.uniform(-90, 90)
+    pitch = random.randint(-45, 45)
+    yaw = random.randint(-45, 45)
 
     random_rotation_actions.extend([{
-        "pitch": pitch,
-        "yaw": yaw
+        "camera": [pitch, yaw],
     }] * 3)
 
 dataset_actions = [
