@@ -324,31 +324,19 @@ def generate_plots(losses, loss_legend, hs_losses, hs_loss_legend, poses, trans_
     poses = np.array(poses)
 
     loss_std = losses.std(axis=0)
-    loss_mean = losses.mean(axis=0)
+    loss_median = np.median(losses, axis=0)
 
-    loss_lower_bound = loss_mean.min() + loss_std.min()
-    if len(np.where(losses < loss_lower_bound)) > len(losses) / 8:
-        loss_lower_bound -= loss_std.min() * 3
-    loss_upper_bound = loss_mean.max() + loss_std.max()
-    if len(np.where(losses > loss_upper_bound)) > len(losses) / 8:
-        loss_upper_bound += loss_std.max() * 3
+    loss_lower_bound = loss_median.min() + loss_std.min()
+    loss_upper_bound = loss_median.max() + loss_std.max()
 
     pose_std = poses.std(axis=0)
-    pose_mean = poses.mean(axis=0)
+    pose_median = np.median(poses, axis=0)
 
-    trans_lower_bound = pose_mean[:, :3].min() - np.abs(pose_std[:, :3].min())
-    if len(np.where(poses[:, :3] < trans_lower_bound)) > len(poses) / 8:
-        trans_lower_bound -= np.abs(pose_std[:, :3].min()) * 3
-    trans_upper_bound = pose_mean[:, :3].max() + pose_std[:, :3].max()
-    if len(np.where(poses[:, :3] > trans_upper_bound)) > len(poses) / 8:
-        trans_upper_bound += pose_std[:, :3].max() * 3
+    trans_lower_bound = pose_median[:, :3].min() - np.abs(pose_std[:, :3].min())
+    trans_upper_bound = pose_median[:, :3].max() + pose_std[:, :3].max()
 
-    rot_lower_bound = pose_mean[:, 3:].min() - np.abs(pose_std[:, 3:].min())
-    if len(np.where(poses[:, 3:] < rot_lower_bound)) > len(poses) / 8:
-        rot_lower_bound -= np.abs(pose_std[:, 3:].min()) * 3
-    rot_upper_bound = pose_mean[:, 3:].max() + pose_std[:, 3:].max()
-    if len(np.where(poses[:, 3:] > rot_upper_bound)) > len(poses) / 8:
-        rot_upper_bound += pose_std[:, 3:].max() * 3
+    rot_lower_bound = pose_median[:, 3:].min() - np.abs(pose_std[:, 3:].min())
+    rot_upper_bound = pose_median[:, 3:].max() + pose_std[:, 3:].max()
 
     x_ticks = np.array(list(reversed(range(-RUNNING_PLOT_RANGE // 2, RUNNING_PLOT_RANGE // 2 + 1))))
 
@@ -368,7 +356,7 @@ def generate_plots(losses, loss_legend, hs_losses, hs_loss_legend, poses, trans_
                                           x_ticks=x_ticks,
                                           y_values=losses[:, idxs],
                                           y_label="photo loss",
-                                          y_ticks=np.linspace(0, loss_upper_bound, 10),
+                                          y_ticks=np.linspace(loss_lower_bound, loss_upper_bound, 10),
                                           legend_labels=loss_legend)
 
         loss_plots.append(loss_plot)
@@ -425,7 +413,7 @@ def generate_plots(losses, loss_legend, hs_losses, hs_loss_legend, poses, trans_
 
         rot_plots.append(rot_plot)
 
-    return loss_plots, hs_loss_plots, trans_plots, rot_plots
+    return trans_plots, rot_plots, loss_plots, hs_loss_plots
 
 
 def create_video_frames(grid_frames, labels, plots, video_height, video_width):
@@ -491,9 +479,9 @@ def main(frames_root_path: str,
     rot_plot_legend = ["pitch", "yaw", "roll"]
 
     grid_frame_labels = [["0-frame", "1-frame", "warped"],
-                         ["depth", "0f - 1f", "1f - warped"],
-                         ["", "0f/2 + 1f/2", "1f/2 + warped/2"],
-                         ["", "0f - 1f hs", "1f - warped hs"]]
+                         ["depth 0f", "0f/2 + 1f/2", "1f/2 + warped/2"],
+                         ["depth 1f", "0f - 1f", "1f - warped"],
+                         ["depth 0f - depth 1f", "0f - 1f hs", "1f - warped hs"]]
 
     losses = []
     hs_losses = []
@@ -548,7 +536,10 @@ def main(frames_root_path: str,
         trans_plot_legend.extend(["tx gs", "ty gs", "tz gs"])
         rot_plot_legend.extend(["pitch gs", "yaw gs", "roll gs"])
 
-        labels = [["grid search warped"], ["1f - gs warped"], ["1f/2 + gs warped/2"], ["1f - gs warped"]]
+        labels = [["grid search warped"],
+                  ["1f/2 + gs warped/2"],
+                  ["1f - gs warped"],
+                  ["1f - gs warped hs"]]
 
         grid_frame_labels = [row + labels[i] for i, row in enumerate(grid_frame_labels)]
 
@@ -620,8 +611,11 @@ def main(frames_root_path: str,
 
     grid_frames = []
 
-    for i in range(len(tgt_imgs)):
-        frame = [[tgt_imgs[i]], [depths[i]], [np.zeros_like(tgt_imgs[i])], [np.zeros_like(tgt_imgs[i])]]
+    for i in range(len(tgt_imgs) - 1):
+        current_depth = depths[i]
+        next_depth = depths[i + 1]
+        depth_diff = cv2.absdiff(current_depth, next_depth)
+        frame = [[tgt_imgs[i]], [current_depth], [next_depth], [depth_diff]]
 
         for res in result_imgs:
             for row, imgs in enumerate(res):
