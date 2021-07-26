@@ -138,12 +138,75 @@ def generate_running_plot(x_values, x_label, x_ticks, y_values, y_label, y_ticks
     return plot
 
 
-def predict(frames_root_path, pose_net_path, disp_net_path, seq_length=3, step=1):
+def sfm_learner(seq_frames, disp_net, pose_net):
+    imgs = [np.transpose(img, (2, 0, 1)) for img in seq_frames]
+
+    ref_imgs = []
+    for i, img in enumerate(imgs):
+        temp_img = torch.from_numpy(img).unsqueeze(0)
+        temp_img = ((temp_img / 255 - 0.5) / 0.5).to(device)
+        if i == len(imgs) // 2:
+            tgt_img = temp_img
+            tgt_frame = np.transpose(img, (1, 2, 0)).astype(np.uint8)
+            next_frame = np.transpose(imgs[i + 1], (1, 2, 0)).astype(np.uint8)
+        else:
+            ref_imgs.append(temp_img)
+
+    start_time = time.time()
+    pred_disp = 1 / disp_net(tgt_img)[0]
+    disp_net_calc_time = time.time() - start_time
+
+    depth_img = pred_disp.squeeze(0).detach().numpy()
+    # scale every value to max 1
+    depth_img[depth_img > 1] = 1
+    depth_img = cv2.cvtColor(depth_img * 255, cv2.COLOR_GRAY2BGR).astype(np.uint8)
+
+    start_time = time.time()
+    _, img_poses = pose_net(tgt_img, ref_imgs)
+    pose_net_calc_time = time.time() - start_time
+
+    img_poses = img_poses.cpu()[0]
+    img_poses = torch.cat([img_poses[:len(imgs) // 2], torch.zeros(1, 6).float(), img_poses[len(imgs) // 2:]])
+
+    inv_transform_matrices = pose_vec2mat(img_poses, rotation_mode="euler").detach().numpy().astype(np.float64)
+
+    rot_matrices = np.linalg.inv(inv_transform_matrices[:, :, :3])
+    tr_vectors = -rot_matrices @ inv_transform_matrices[:, :, -1:]
+
+    transform_matrices = np.concatenate([rot_matrices, tr_vectors], axis=-1)
+
+    first_inv_transform = inv_transform_matrices[0]
+    final_poses = first_inv_transform[:, :3] @ transform_matrices
+    final_poses[:, :, -1:] += first_inv_transform[:, -1:]
+
+    img_poses = pose_mat2vec(final_poses)
+
+    tgt_pose = img_poses[len(imgs) // 2 + 1]
+    tgt_pose_tensor = torch.from_numpy(tgt_pose.astype(np.float32)).unsqueeze(0)
+
+    depth_tensor = pred_disp.detach()
+
+    warped_frame_tensor, valid_points = inverse_warp(tgt_img, depth_tensor, tgt_pose_tensor, INTRINSICS)
+
+    warped_frame = np.transpose((warped_frame_tensor.squeeze(0) * 0.5 + 0.5) * 255,
+                                (1, 2, 0)).detach().numpy().astype(np.uint8)
+
+    valid_points = np.transpose(valid_points.numpy(), (1, 2, 0))
+
+    return tgt_frame, \
+           next_frame, \
+           warped_frame * valid_points, \
+           depth_img, \
+           valid_points, \
+           tgt_pose, \
+           disp_net_calc_time, \
+           pose_net_calc_time
+
+
+def sfm_learner_predict(frame_seq, pose_net_path, disp_net_path):
     pose_net = load_pose_exp_net(pose_net_path)
 
-    disp_net = None
-    if disp_net_path:
-        disp_net = load_disp_net(disp_net_path)
+    disp_net = load_disp_net(disp_net_path)
 
     tgt_frames = []
     next_frames = []
@@ -154,80 +217,16 @@ def predict(frames_root_path, pose_net_path, disp_net_path, seq_length=3, step=1
 
     calc_timings = []
 
-    for i, seq_frames in enumerate(SeqFrames(Path(frames_root_path), seq_length=seq_length, step=step)):
-        imgs = [np.transpose(img, (2, 0, 1)) for img in seq_frames]
+    for i, seq_frames in enumerate(frame_seq):
+        pred_res = sfm_learner(seq_frames, disp_net, pose_net)
 
-        ref_imgs = []
-        for i, img in enumerate(imgs):
-            temp_img = torch.from_numpy(img).unsqueeze(0)
-            temp_img = ((temp_img / 255 - 0.5) / 0.5).to(device)
-            if i == len(imgs) // 2:
-                tgt_img = temp_img
-                tgt_frame = np.transpose(img, (1, 2, 0)).astype(np.uint8)
-                next_frame = np.transpose(imgs[i + 1], (1, 2, 0)).astype(np.uint8)
-            else:
-                ref_imgs.append(temp_img)
-
-        pred_disp = None
-        depth_img = np.zeros((64, 64, 3), dtype=np.uint8)
-
-        disp_net_calc_time = None
-
-        if disp_net_path:
-            start_time = time.time()
-            pred_disp = disp_net(tgt_img)[0]
-            disp_net_calc_time = time.time() - start_time
-
-            depth_img = pred_disp.squeeze(0).detach().numpy()
-            depth_img = cv2.cvtColor((depth_img / 10) * 255, cv2.COLOR_GRAY2BGR).astype(np.uint8)
-
-        start_time = time.time()
-        _, img_poses = pose_net(tgt_img, ref_imgs)
-        pose_net_calc_time = time.time() - start_time
-
-        calc_timings.append((disp_net_calc_time, pose_net_calc_time))
-
-        img_poses = img_poses.cpu()[0]
-        img_poses = torch.cat([img_poses[:len(imgs) // 2], torch.zeros(1, 6).float(), img_poses[len(imgs) // 2:]])
-
-        inv_transform_matrices = pose_vec2mat(img_poses, rotation_mode="euler").detach().numpy().astype(np.float64)
-
-        rot_matrices = np.linalg.inv(inv_transform_matrices[:, :, :3])
-        tr_vectors = -rot_matrices @ inv_transform_matrices[:, :, -1:]
-
-        transform_matrices = np.concatenate([rot_matrices, tr_vectors], axis=-1)
-
-        first_inv_transform = inv_transform_matrices[0]
-        final_poses = first_inv_transform[:, :3] @ transform_matrices
-        final_poses[:, :, -1:] += first_inv_transform[:, -1:]
-
-        img_poses = pose_mat2vec(final_poses)
-
-        tgt_pose = img_poses[len(imgs) // 2 + 1]
-        poses.append(tgt_pose)
-        tgt_pose_tensor = torch.from_numpy(tgt_pose.astype(np.float32)).unsqueeze(0)
-
-        if pred_disp is not None and False:
-            depth_tensor = pred_disp
-        else:
-            depth_plane = np.full((64, 64, 1), 150, dtype=np.uint8)
-
-            depth_plane = np.transpose(depth_plane, (2, 0, 1))
-            depth_tensor = torch.from_numpy(depth_plane.astype(np.float32))
-
-        # warped diff loss
-        warped_frame_tensor, valid_points = inverse_warp(tgt_img, depth_tensor, tgt_pose_tensor, INTRINSICS)
-
-        warped_frame = np.transpose((warped_frame_tensor.squeeze(0) * 0.5 + 0.5) * 255,
-                                    (1, 2, 0)).detach().numpy().astype(np.uint8)
-
-        valid_points = np.transpose(valid_points.numpy(), (1, 2, 0))
-
-        tgt_frames.append(tgt_frame)
-        next_frames.append(next_frame)
-        warped_frames.append(warped_frame * valid_points)
-        depth_imgs.append(depth_img)
-        valid_points_list.append(valid_points)
+        tgt_frames.append(pred_res[0])
+        next_frames.append(pred_res[1])
+        warped_frames.append(pred_res[2])
+        depth_imgs.append(pred_res[3])
+        valid_points_list.append(pred_res[4])
+        poses.append(pred_res[5])
+        calc_timings.append(pred_res[6:8])
 
     return tgt_frames, next_frames, warped_frames, valid_points_list, poses, depth_imgs, calc_timings
 
@@ -493,11 +492,10 @@ def main(frames_root_path: str,
     print("sfmlearner predict")
 
     #  tgt_frames, next_frames, warped_frames, valid_points_list, poses, depth_imgs
-    *predict_res, nn_calc_timings = predict(frames_root_path,
-                                            pose_net_path,
-                                            disp_net_path,
-                                            seq_len,
-                                            step)
+    *predict_res, nn_calc_timings = sfm_learner_predict(
+        SeqFrames(Path(frames_root_path), seq_length=seq_len, step=step),
+        pose_net_path,
+        disp_net_path)
 
     if timings:
         n_images = len(predict_res[0])
@@ -632,7 +630,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")
     parser.add_argument("frames_root_path", type=str, help="Path to root dir of frames")
     parser.add_argument("pose_net_path", type=str, help="Path to trained PoseNet")
-    parser.add_argument("-d", "--disp-net-path", type=str, help="Path to trained DispNet")
+    parser.add_argument("disp_net_path", type=str, help="Path to trained DispNet")
     parser.add_argument("-o", "--output", type=str, help="Path to output video file", default="video.mp4")
     parser.add_argument("--seq-len", type=int, help="Sequence length", default=3)
     parser.add_argument("--step", type=int, help="Number of steps", default=1)
