@@ -70,7 +70,7 @@ def save_dataset(dataset_desc_path, scene_paths, intrinsics):
         for path in scene_paths:
             frames_path = path.joinpath("frames")
 
-            f.write(f"../{frames_path}")
+            f.write(str(frames_path))
             f.write("\n")
 
             frames_path.mkdir(parents=True, exist_ok=True)

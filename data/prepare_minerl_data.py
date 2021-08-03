@@ -1,11 +1,12 @@
 import glob
+import json
 import random
 import sys
 from multiprocessing import Pool
 from pathlib import Path
-import numpy as np
+
 import cv2
-import json
+import numpy as np
 
 
 def convert_video_to_frames(video_path, frames_path, frames_start):
@@ -49,7 +50,7 @@ def save_dataset(dataset_desc_path, scene_paths, intrinsics):
         for path in scene_paths:
             frames_path = path.joinpath("frames")
 
-            f.write(f"../{frames_path}")
+            f.write(str(frames_path))
             f.write("\n")
 
             frames_path.mkdir(parents=True, exist_ok=True)
