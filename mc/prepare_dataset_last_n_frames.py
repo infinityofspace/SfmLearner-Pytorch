@@ -23,7 +23,7 @@ def convert_video_to_frames(video_path, frames_path, metadata_file_path, last_n_
     i = 0
 
     # skip all non valid frames
-    while video.isOpened() and i <= max_frame_num - last_n_frames:
+    while video.isOpened() and i < max_frame_num - last_n_frames:
         ret, frame = video.read()
         if not ret:
             print("the frames start value is higher than the number of frames")

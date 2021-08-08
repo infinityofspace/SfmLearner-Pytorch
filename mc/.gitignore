@@ -1,0 +1,9 @@
+*.png
+metadata.json
+rendered.npz
+*.txt
+actions.npy
+
+*.zip
+*.tar
+*.log

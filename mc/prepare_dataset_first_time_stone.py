@@ -1,5 +1,6 @@
 """
 Remove all frames at the beginning until the agent mines the first time stone or cobblestone.
+Any frames with no movement will be removed.
 """
 
 import glob
@@ -28,10 +29,18 @@ def convert_video_to_frames(video_path, frames_path, frames_start):
 
         i += 1
 
+    last_frame = None
+
     while video.isOpened():
         ret, frame = video.read()
         if not ret:
             break
+
+        # filter static frames eg. all frames with no big changes
+        if last_frame is not None and cv2.absdiff(last_frame, frame).mean() < 1:
+            continue
+
+        last_frame = frame
 
         cv2.imwrite(str(frames_path.joinpath(f"{i}.png")), frame)
 
