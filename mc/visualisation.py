@@ -79,7 +79,8 @@ class SeqFrames(object):
         shift_range = np.array([step * i for i in range(-demi_length, demi_length + 1)]).reshape(1, -1)
         indices = shift_range + np.arange(demi_length, len(self.image_paths) - demi_length).reshape(-1, 1)
 
-        self.image_seq_paths = [self.image_paths[i] for i in indices]
+        self.image_seq_paths = [self.image_paths[i] for i in indices if
+                                np.min(i) > 0 and np.max(i) < len(self.image_paths)]
 
     def generator(self):
         for seq_paths in self.image_seq_paths:
@@ -203,7 +204,7 @@ def sfm_learner(seq_frames, disp_net, pose_net):
            pose_net_calc_time
 
 
-def sfm_learner_predict(frame_seq, pose_net_path, disp_net_path):
+def sfm_learner_predict(frame_seqs, pose_net_path, disp_net_path, step=1):
     pose_net = load_pose_exp_net(pose_net_path)
 
     disp_net = load_disp_net(disp_net_path)
@@ -217,7 +218,7 @@ def sfm_learner_predict(frame_seq, pose_net_path, disp_net_path):
 
     calc_timings = []
 
-    for i, seq_frames in enumerate(frame_seq):
+    for seq_frames in frame_seqs:
         pred_res = sfm_learner(seq_frames, disp_net, pose_net)
 
         tgt_frames.append(pred_res[0])
